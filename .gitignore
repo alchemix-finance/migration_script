@@ -1,0 +1,22 @@
+# Apeworx
+.build/
+.cache/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Logs (temporary debugging)
+logs/
+
+# Local overrides
+CLAUDE.local.md
+
+# Reports (agent work logs)
+.claude/reports/
+
+# Environment
+.env
+.env.local
