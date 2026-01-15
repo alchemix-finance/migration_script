@@ -157,8 +157,7 @@ def _create_deposit_call(
 ) -> TransactionCall:
     """Create a deposit transaction call for a position.
 
-    Note: Actual transaction data encoding happens in PR 4.
-    This creates a placeholder structure with gas estimate.
+    Uses the transactions module to properly encode calldata.
 
     Args:
         position: The position to deposit
@@ -166,11 +165,26 @@ def _create_deposit_call(
         multisig: Multisig address (recipient of NFT)
 
     Returns:
-        TransactionCall with gas estimate
+        TransactionCall with encoded calldata and gas estimate
     """
+    from src.abi import load_cdp_abi
+    from src.transactions import encode_function_call
+
+    # Load CDP ABI and encode the deposit call
+    cdp_abi = load_cdp_abi()
+    calldata = encode_function_call(
+        abi=cdp_abi,
+        function_name="deposit",
+        args=[
+            position.deposit_amount,  # amount: uint256
+            multisig,  # recipient: address
+            position.token_id,  # tokenId: uint256
+        ],
+    )
+
     return TransactionCall(
         to=cdp_contract,
-        data=b"",  # Will be encoded in PR 4
+        data=calldata,
         value=0,
         gas_estimate=estimate_deposit_gas(position),
         description=f"deposit({position.deposit_amount}, {multisig}, {position.token_id}) for {position.user_address}",
@@ -183,19 +197,33 @@ def _create_mint_call(
 ) -> TransactionCall:
     """Create a mint transaction call for a position.
 
-    Note: Actual transaction data encoding happens in PR 4.
-    This creates a placeholder structure with gas estimate.
+    Uses the transactions module to properly encode calldata.
 
     Args:
         position: The position to mint against
         cdp_contract: CDP contract address
 
     Returns:
-        TransactionCall with gas estimate
+        TransactionCall with encoded calldata and gas estimate
     """
+    from src.abi import load_cdp_abi
+    from src.transactions import encode_function_call
+
+    # Load CDP ABI and encode the mint call
+    cdp_abi = load_cdp_abi()
+    calldata = encode_function_call(
+        abi=cdp_abi,
+        function_name="mint",
+        args=[
+            position.token_id,  # tokenId: uint256
+            position.mint_amount,  # amount: uint256
+            position.user_address,  # recipient: address
+        ],
+    )
+
     return TransactionCall(
         to=cdp_contract,
-        data=b"",  # Will be encoded in PR 4
+        data=calldata,
         value=0,
         gas_estimate=estimate_mint_gas(position),
         description=f"mint({position.token_id}, {position.mint_amount}, {position.user_address})",
@@ -209,8 +237,7 @@ def _create_transfer_call(
 ) -> TransactionCall:
     """Create an NFT transfer transaction call for a position.
 
-    Note: Actual transaction data encoding happens in PR 4.
-    This creates a placeholder structure with gas estimate.
+    Uses the transactions module to properly encode calldata.
 
     Args:
         position: The position NFT to transfer
@@ -218,11 +245,26 @@ def _create_transfer_call(
         multisig: Multisig address (current owner)
 
     Returns:
-        TransactionCall with gas estimate
+        TransactionCall with encoded calldata and gas estimate
     """
+    from src.abi import load_erc721_abi
+    from src.transactions import encode_function_call
+
+    # Load ERC721 ABI and encode the transfer call
+    erc721_abi = load_erc721_abi()
+    calldata = encode_function_call(
+        abi=erc721_abi,
+        function_name="transferFrom",
+        args=[
+            multisig,  # from: address (current owner)
+            position.user_address,  # to: address (original user)
+            position.token_id,  # tokenId: uint256
+        ],
+    )
+
     return TransactionCall(
         to=nft_contract,
-        data=b"",  # Will be encoded in PR 4
+        data=calldata,
         value=0,
         gas_estimate=estimate_transfer_gas(position),
         description=f"transferFrom({multisig}, {position.user_address}, {position.token_id})",
