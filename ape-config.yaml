@@ -1,0 +1,41 @@
+name: cdp-migration
+
+plugins:
+  - name: alchemy
+  - name: etherscan
+
+default_ecosystem: ethereum
+
+ethereum:
+  default_network: mainnet-fork
+  mainnet:
+    default_provider: alchemy
+  mainnet-fork:
+    default_provider: foundry
+
+arbitrum:
+  default_network: mainnet-fork
+  mainnet:
+    default_provider: alchemy
+  mainnet-fork:
+    default_provider: foundry
+
+optimism:
+  default_network: mainnet-fork
+  mainnet:
+    default_provider: alchemy
+  mainnet-fork:
+    default_provider: foundry
+
+# Gas configuration for batching
+gas:
+  # Target batch gas limit (16M with 5% buffer)
+  batch_limit: 15200000
+  # Reserve headroom for safety
+  headroom_percent: 5
+
+# Project dependencies
+dependencies:
+  - name: openzeppelin
+    github: OpenZeppelin/openzeppelin-contracts
+    version: 4.9.3
