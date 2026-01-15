@@ -19,7 +19,14 @@ It orchestrates the full migration flow:
 import click
 from ape.cli import ape_cli_context
 
-from src.config import get_chain_config, get_csv_path, get_supported_chains, validate_chain_config
+from src.config import (
+    ChainConfigError,
+    get_chain_config,
+    get_csv_path,
+    get_supported_chains,
+    validate_chain_config,
+    verify_chain_config,
+)
 from src.gas import calculate_batch_statistics, create_batches
 from src.preview import (
     format_confirmation_prompt,
@@ -104,31 +111,6 @@ def cli(
     if dry_run:
         click.echo(click.style("Mode: DRY RUN (no transactions will be proposed)", fg="yellow"))
 
-    # Validate chain configuration
-    missing_config = validate_chain_config(chain)
-    if missing_config:
-        click.echo(
-            click.style(
-                f"\nWarning: Chain configuration incomplete. Missing: {', '.join(missing_config)}",
-                fg="yellow",
-            )
-        )
-        if not dry_run:
-            click.echo(
-                click.style(
-                    "Please configure all addresses in src/config.py before migration.",
-                    fg="yellow",
-                )
-            )
-            click.echo(
-                click.style(
-                    "Use --dry-run to test the flow without configured addresses.",
-                    fg="blue",
-                )
-            )
-            raise SystemExit(1)
-        click.echo(click.style("Continuing with placeholder addresses (dry-run mode).", fg="yellow"))
-
     chain_config = get_chain_config(chain)
     click.echo(f"Chain ID: {chain_config['chain_id']}")
 
@@ -176,6 +158,42 @@ def cli(
     if not result.positions:
         click.echo(click.style("\nNo positions found in CSV file.", fg="yellow"))
         raise SystemExit(0)
+
+    # Verify chain configuration based on actual position types
+    # This is done AFTER validation so we know what position types exist
+    has_usd = result.usd_token_count > 0
+    has_eth = result.eth_token_count > 0
+
+    if not dry_run:
+        try:
+            verify_chain_config(chain, has_usd_positions=has_usd, has_eth_positions=has_eth)
+        except ChainConfigError as e:
+            click.echo("")
+            click.echo(click.style(f"Error: {e.message}", fg="red"))
+            click.echo(
+                click.style(
+                    "Please configure all required addresses in src/config.py before migration.",
+                    fg="yellow",
+                )
+            )
+            click.echo(
+                click.style(
+                    "Use --dry-run to test the flow without configured addresses.",
+                    fg="blue",
+                )
+            )
+            raise SystemExit(1)
+    else:
+        # In dry-run mode, show warning but continue
+        missing_config = validate_chain_config(chain)
+        if missing_config:
+            click.echo(
+                click.style(
+                    f"\nWarning: Chain configuration incomplete. Missing: {', '.join(missing_config)}",
+                    fg="yellow",
+                )
+            )
+            click.echo(click.style("Continuing with placeholder addresses (dry-run mode).", fg="yellow"))
 
     # =========================================================================
     # Step 2: Build transaction batches

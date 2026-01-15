@@ -180,3 +180,116 @@ def get_supported_chains() -> list[str]:
         List of chain name strings
     """
     return list(CHAINS.keys())
+
+
+# Valid chain names constant
+VALID_CHAINS = ("mainnet", "optimism", "arbitrum")
+
+
+class ChainConfigError(Exception):
+    """Raised when chain configuration is invalid or incomplete."""
+
+    def __init__(self, chain: str, missing_fields: list[str], message: str = ""):
+        self.chain = chain
+        self.missing_fields = missing_fields
+        self.message = message or f"Chain '{chain}' configuration incomplete. Missing or empty: {', '.join(missing_fields)}"
+        super().__init__(self.message)
+
+
+def is_valid_address(address: str) -> bool:
+    """Check if an address is valid (non-empty and properly formatted).
+
+    Args:
+        address: Address string to validate
+
+    Returns:
+        True if valid, False otherwise
+    """
+    if not address or not isinstance(address, str):
+        return False
+    # Must start with 0x and have 40 hex characters after
+    if not address.startswith("0x"):
+        return False
+    if len(address) != 42:
+        return False
+    try:
+        int(address, 16)
+        return True
+    except ValueError:
+        return False
+
+
+def verify_chain_config(
+    chain: str,
+    has_usd_positions: bool = True,
+    has_eth_positions: bool = True,
+    require_all: bool = False,
+) -> None:
+    """Verify that required chain configuration is set before execution.
+
+    This function verifies that the chain configuration has valid addresses
+    for the operations that will be performed. It raises an error if any
+    required addresses are missing or placeholder.
+
+    Args:
+        chain: Chain name (mainnet, optimism, arbitrum)
+        has_usd_positions: Whether there are USD positions to migrate
+        has_eth_positions: Whether there are ETH positions to migrate
+        require_all: If True, verify all addresses regardless of position types
+
+    Raises:
+        ChainConfigError: If required configuration is missing or invalid
+        ValueError: If chain is not supported
+
+    Required addresses:
+    - multisig: Always required
+    - cdp_usd / nft_usd: Required if has_usd_positions
+    - cdp_eth / nft_eth: Required if has_eth_positions
+    """
+    config = get_chain_config(chain)
+    missing = []
+
+    # Multisig is always required
+    if not is_valid_address(config.get("multisig", "")):
+        missing.append("multisig")
+
+    # Check USD-specific addresses if needed
+    if has_usd_positions or require_all:
+        if not is_valid_address(config.get("cdp_usd", "")):
+            missing.append("cdp_usd")
+        if not is_valid_address(config.get("nft_usd", "")):
+            missing.append("nft_usd")
+
+    # Check ETH-specific addresses if needed
+    if has_eth_positions or require_all:
+        if not is_valid_address(config.get("cdp_eth", "")):
+            missing.append("cdp_eth")
+        if not is_valid_address(config.get("nft_eth", "")):
+            missing.append("nft_eth")
+
+    if missing:
+        raise ChainConfigError(chain, missing)
+
+
+def get_required_config_fields(
+    has_usd_positions: bool = True,
+    has_eth_positions: bool = True,
+) -> list[str]:
+    """Get list of required configuration fields based on position types.
+
+    Args:
+        has_usd_positions: Whether there are USD positions
+        has_eth_positions: Whether there are ETH positions
+
+    Returns:
+        List of required field names
+    """
+    fields = ["multisig"]
+
+    if has_usd_positions:
+        fields.extend(["cdp_usd", "nft_usd"])
+
+    if has_eth_positions:
+        fields.extend(["cdp_eth", "nft_eth"])
+
+    return fields

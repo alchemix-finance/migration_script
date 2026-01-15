@@ -17,6 +17,7 @@ from ape.cli import ape_cli_context
 from src.config import (
     GAS_BATCH_LIMIT,
     GAS_HEADROOM_PERCENT,
+    VALID_CHAINS,
     get_chain_config,
     get_csv_path,
     get_supported_chains,

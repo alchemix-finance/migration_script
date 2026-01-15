@@ -16,7 +16,13 @@ that would be executed during migration, including:
 import click
 from ape.cli import ape_cli_context
 
-from src.config import get_chain_config, get_csv_path, get_supported_chains, validate_chain_config
+from src.config import (
+    VALID_CHAINS,
+    get_chain_config,
+    get_csv_path,
+    get_supported_chains,
+    validate_chain_config,
+)
 from src.gas import create_batches
 from src.preview import print_full_preview
 from src.validation import format_validation_errors, validate_csv_file

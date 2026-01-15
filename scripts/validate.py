@@ -17,7 +17,12 @@ This script validates CSV data files before migration:
 import click
 from ape.cli import ape_cli_context
 
-from src.config import get_csv_path, get_supported_chains, validate_chain_config
+from src.config import (
+    VALID_CHAINS,
+    get_csv_path,
+    get_supported_chains,
+    validate_chain_config,
+)
 from src.validation import (
     format_validation_errors,
     validate_csv_file,
