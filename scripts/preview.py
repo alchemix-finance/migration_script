@@ -3,21 +3,23 @@
 
 Usage:
     ape run preview --chain mainnet
+    ape run preview --chain mainnet --verbose
 
 This script generates a human-readable preview of all transactions
 that would be executed during migration, including:
-- Deposit transactions (collateral amounts)
-- Mint transactions (debt amounts)
-- NFT transfer transactions (recipient addresses)
-- Gas estimates per batch
-- Total transaction count
+- Position summary (USD and ETH counts, totals)
+- Transaction batches with gas estimates
+- Individual transaction details (with --verbose)
+- Batch overview and utilization statistics
 """
 
 import click
-from ape import project
 from ape.cli import ape_cli_context
 
-from src.config import get_csv_path, get_supported_chains, validate_chain_config
+from src.config import get_chain_config, get_csv_path, get_supported_chains, validate_chain_config
+from src.gas import create_batches
+from src.preview import print_full_preview
+from src.validation import format_validation_errors, validate_csv_file
 
 
 @click.command()
@@ -40,11 +42,13 @@ def cli(cli_ctx, chain: str, verbose: bool) -> None:
 
     Displays:
     - Total positions to migrate (USD and ETH)
+    - Position value summaries (collateral and debt)
     - Transaction batches with gas estimates
     - Individual transaction details (with --verbose)
     - Summary statistics
     """
     click.echo(f"Generating migration preview for {chain}...")
+    click.echo("")
 
     # Check chain configuration
     missing_config = validate_chain_config(chain)
@@ -55,6 +59,13 @@ def cli(cli_ctx, chain: str, verbose: bool) -> None:
                 fg="yellow",
             )
         )
+        click.echo(
+            click.style(
+                "Preview will use placeholder addresses.",
+                fg="yellow",
+            )
+        )
+        click.echo("")
 
     # Get CSV path
     csv_path = get_csv_path(chain)
@@ -64,23 +75,71 @@ def cli(cli_ctx, chain: str, verbose: bool) -> None:
 
     click.echo(f"CSV file: {csv_path}")
 
-    # TODO: Implement preview in PR 6
-    # - Load and validate CSV
-    # - Build transaction list
-    # - Estimate gas for each transaction
-    # - Group into batches
-    # - Display human-readable summary
+    # Step 1: Load and validate CSV
+    click.echo("Validating CSV data...")
+    result = validate_csv_file(csv_path, chain)
 
-    click.echo(click.style("Preview not yet implemented (PR 6)", fg="yellow"))
+    if not result.is_valid:
+        click.echo("")
+        click.echo(click.style(format_validation_errors(result.errors), fg="red"))
+        raise SystemExit(1)
 
-    # Placeholder summary
-    click.echo("\n" + "=" * 50)
-    click.echo("MIGRATION PREVIEW SUMMARY")
-    click.echo("=" * 50)
-    click.echo(f"Chain: {chain}")
-    click.echo(f"Data file: {csv_path}")
-    click.echo("Total positions: <pending>")
-    click.echo("USD positions: <pending>")
-    click.echo("ETH positions: <pending>")
-    click.echo("Total batches: <pending>")
-    click.echo("=" * 50)
+    if not result.positions:
+        click.echo(click.style("No positions found in CSV file.", fg="yellow"))
+        raise SystemExit(0)
+
+    click.echo(
+        click.style(
+            f"Found {len(result.positions)} position(s) to migrate.",
+            fg="green",
+        )
+    )
+
+    # Step 2: Get chain config for contract addresses
+    try:
+        chain_config = get_chain_config(chain)
+    except ValueError:
+        # Use empty config if chain not found
+        chain_config = {
+            "chain_id": 0,
+            "multisig": "",
+            "cdp_usd": "",
+            "cdp_eth": "",
+            "nft_usd": "",
+            "nft_eth": "",
+            "collateral_usd": "",
+            "collateral_eth": "",
+        }
+
+    # Step 3: Create transaction batches
+    click.echo("Creating transaction batches...")
+    batches = create_batches(result.positions, chain, chain_config)
+
+    if not batches:
+        click.echo(click.style("No batches created.", fg="yellow"))
+        raise SystemExit(0)
+
+    # Step 4: Print the full preview
+    print_full_preview(
+        chain=chain,
+        positions=result.positions,
+        batches=batches,
+        chain_config=chain_config,
+        verbose=verbose,
+    )
+
+    # Print usage hint
+    click.echo("")
+    if not verbose:
+        click.echo(
+            click.style(
+                "Tip: Use --verbose to see individual transaction details.",
+                fg="blue",
+            )
+        )
+    click.echo(
+        click.style(
+            f"To execute: ape run migrate --chain {chain}",
+            fg="blue",
+        )
+    )
