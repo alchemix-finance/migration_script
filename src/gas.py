@@ -1,406 +1,317 @@
-"""Gas estimation and transaction batching for CDP migration.
+"""Gas estimation and transaction batching for V3 migration.
 
-This module provides:
-- Dynamic gas estimation per operation type (deposit, mint, transfer)
-- Greedy bin-packing algorithm for batch optimization
-- Batch size verification against 16M gas limit with 5% buffer
+Batching strategy for deposit phase:
+  Each batch starts with setDepositCap(currentCap + batchDepositSum), then
+  interleaves deposit + mint per user. This keeps each position's deposit
+  and mint in the same batch (same Safe tx), which simplifies on-chain ordering.
 
-Gas Batching Rules (from CLAUDE.md):
-- Target: Pack transactions to maximize batch size under ~16M gas limit
-- Estimation: Dynamically estimate gas per transaction
-- Strategy: Greedy bin-packing - add transactions until limit approached
-- Buffer: Reserve 5% headroom below gas limit for safety
-- Order: Process ALL deposits first, then ALL mints, then ALL transfers
+  Rationale for deposit+mint together (vs all-deposits-then-all-mints):
+  - mint() requires the caller to own the NFT, which deposit() just created
+  - Separating them would require tracking token IDs across batch boundaries
+  - Keeping them together means each batch is self-contained and independently safe
+
+Gas limit: 16M. Target: 90% = 14.4M per batch (10% headroom).
 """
 
-from dataclasses import dataclass
-from enum import Enum
-from typing import Literal
-
-from src.config import GAS_BATCH_LIMIT
-from src.types import PositionMigration, TransactionBatch, TransactionCall
-
-
-# Gas constants
-GAS_LIMIT = 16_000_000  # Maximum gas per block/batch
-GAS_BUFFER = 0.95  # 5% headroom for safety
-EFFECTIVE_GAS_LIMIT = int(GAS_LIMIT * GAS_BUFFER)  # 15,200,000
-
-# Base gas costs for each operation type
-# These are conservative estimates that account for:
-# - Base transaction overhead
-# - Storage operations (SSTORE costs)
-# - Contract interaction costs
-# Values can be tuned based on actual on-chain data
-BASE_GAS_DEPOSIT = 150_000  # deposit() - creates position, stores collateral
-BASE_GAS_MINT = 120_000  # mint() - borrows against position
-BASE_GAS_TRANSFER = 65_000  # transferFrom() - standard ERC721 transfer
-
-# Additional gas per significant collateral amount (for large positions)
-# Large positions may have slightly higher gas due to overflow checks, etc.
-GAS_PER_LARGE_POSITION = 10_000
-LARGE_POSITION_THRESHOLD = 10**21  # 1000 tokens in wei
+from src.config import (
+    EFFECTIVE_GAS_LIMIT,
+    GAS_BURN,
+    GAS_DEPOSIT,
+    GAS_MINT,
+    GAS_SET_DEPOSIT_CAP,
+    GAS_TRANSFER_ALTOKEN,
+    GAS_TRANSFER_NFT,
+    GAS_LARGE_POSITION_SURCHARGE,
+    LARGE_POSITION_THRESHOLD,
+)
+from src.types import MigrationPlan, PositionMigration, TransactionBatch, TransactionCall
 
 
-class OperationType(str, Enum):
-    """Types of operations in a CDP migration."""
-
-    DEPOSIT = "deposit"
-    MINT = "mint"
-    TRANSFER = "transfer"
-
-
-@dataclass
-class GasEstimate:
-    """Gas estimate for a single operation."""
-
-    operation_type: OperationType
-    base_gas: int
-    additional_gas: int = 0
-    position_id: int | None = None
-
-    @property
-    def total_gas(self) -> int:
-        """Total estimated gas for the operation."""
-        return self.base_gas + self.additional_gas
+def _gas_deposit(p: PositionMigration) -> int:
+    g = GAS_DEPOSIT
+    if p.deposit_amount_wei >= LARGE_POSITION_THRESHOLD:
+        g += GAS_LARGE_POSITION_SURCHARGE
+    return g
 
 
-def estimate_deposit_gas(position: PositionMigration) -> int:
-    """Estimate gas for a deposit operation.
+def _gas_mint(p: PositionMigration) -> int:
+    g = GAS_MINT
+    if p.mint_amount_wei >= LARGE_POSITION_THRESHOLD:
+        g += GAS_LARGE_POSITION_SURCHARGE
+    return g
 
-    Deposit operations create a new position by:
-    1. Transferring collateral to the CDP contract
-    2. Creating storage for the position state
-    3. Minting a position NFT to the recipient
 
-    Args:
-        position: The position being migrated
-
-    Returns:
-        Estimated gas in wei
-    """
-    gas = BASE_GAS_DEPOSIT
-
-    # Large deposits may require additional gas for overflow checks
-    if position.deposit_amount >= LARGE_POSITION_THRESHOLD:
-        gas += GAS_PER_LARGE_POSITION
-
+def gas_per_position_in_deposit_batch(p: PositionMigration) -> int:
+    """Gas for one user's slice of a deposit batch: deposit [+ mint]."""
+    gas = _gas_deposit(p)
+    if p.is_debt_user:
+        gas += _gas_mint(p)
     return gas
 
 
-def estimate_mint_gas(position: PositionMigration) -> int:
-    """Estimate gas for a mint operation.
-
-    Mint operations borrow against an existing position by:
-    1. Checking collateralization ratio
-    2. Updating position debt
-    3. Minting debt tokens to the recipient
-
-    Args:
-        position: The position being migrated
-
-    Returns:
-        Estimated gas in wei
-    """
-    gas = BASE_GAS_MINT
-
-    # Large mint amounts may have additional checks
-    if position.mint_amount >= LARGE_POSITION_THRESHOLD:
-        gas += GAS_PER_LARGE_POSITION
-
-    return gas
-
-
-def estimate_transfer_gas(position: PositionMigration) -> int:
-    """Estimate gas for an NFT transfer operation.
-
-    Transfer operations move the position NFT by:
-    1. Verifying ownership
-    2. Updating owner mapping
-    3. Emitting Transfer event
-
-    Args:
-        position: The position being migrated
-
-    Returns:
-        Estimated gas in wei (typically constant for ERC721)
-    """
-    # ERC721 transfers have relatively constant gas costs
-    return BASE_GAS_TRANSFER
-
-
-def estimate_position_total_gas(position: PositionMigration) -> int:
-    """Estimate total gas for migrating a single position.
-
-    A full position migration requires:
-    1. deposit() - create position with collateral
-    2. mint() - borrow against position
-    3. transferFrom() - transfer NFT to user
-
-    Args:
-        position: The position being migrated
-
-    Returns:
-        Total estimated gas for all three operations
-    """
-    return (
-        estimate_deposit_gas(position)
-        + estimate_mint_gas(position)
-        + estimate_transfer_gas(position)
-    )
-
-
-def _create_deposit_call(
-    position: PositionMigration,
-    cdp_contract: str,
+def create_deposit_batches(
+    positions: list[PositionMigration],
+    alchemist_address: str,
+    al_token_address: str,
     multisig: str,
-) -> TransactionCall:
-    """Create a deposit transaction call for a position.
-
-    Uses the transactions module to properly encode calldata.
-
-    Args:
-        position: The position to deposit
-        cdp_contract: CDP contract address
-        multisig: Multisig address (recipient of NFT)
-
-    Returns:
-        TransactionCall with encoded calldata and gas estimate
-    """
-    from src.abi import load_cdp_abi
-    from src.transactions import encode_function_call
-
-    # Load CDP ABI and encode the deposit call
-    cdp_abi = load_cdp_abi()
-    calldata = encode_function_call(
-        abi=cdp_abi,
-        function_name="deposit",
-        args=[
-            position.deposit_amount,  # amount: uint256
-            multisig,  # recipient: address
-            position.token_id,  # tokenId: uint256
-        ],
-    )
-
-    return TransactionCall(
-        to=cdp_contract,
-        data=calldata,
-        value=0,
-        gas_estimate=estimate_deposit_gas(position),
-        description=f"deposit({position.deposit_amount}, {multisig}, {position.token_id}) for {position.user_address}",
-    )
-
-
-def _create_mint_call(
-    position: PositionMigration,
-    cdp_contract: str,
-) -> TransactionCall:
-    """Create a mint transaction call for a position.
-
-    Uses the transactions module to properly encode calldata.
-
-    Args:
-        position: The position to mint against
-        cdp_contract: CDP contract address
-
-    Returns:
-        TransactionCall with encoded calldata and gas estimate
-    """
-    from src.abi import load_cdp_abi
-    from src.transactions import encode_function_call
-
-    # Load CDP ABI and encode the mint call
-    cdp_abi = load_cdp_abi()
-    calldata = encode_function_call(
-        abi=cdp_abi,
-        function_name="mint",
-        args=[
-            position.token_id,  # tokenId: uint256
-            position.mint_amount,  # amount: uint256
-            position.user_address,  # recipient: address
-        ],
-    )
-
-    return TransactionCall(
-        to=cdp_contract,
-        data=calldata,
-        value=0,
-        gas_estimate=estimate_mint_gas(position),
-        description=f"mint({position.token_id}, {position.mint_amount}, {position.user_address})",
-    )
-
-
-def _create_transfer_call(
-    position: PositionMigration,
-    nft_contract: str,
-    multisig: str,
-) -> TransactionCall:
-    """Create an NFT transfer transaction call for a position.
-
-    Uses the transactions module to properly encode calldata.
-
-    Args:
-        position: The position NFT to transfer
-        nft_contract: NFT contract address
-        multisig: Multisig address (current owner)
-
-    Returns:
-        TransactionCall with encoded calldata and gas estimate
-    """
-    from src.abi import load_erc721_abi
-    from src.transactions import encode_function_call
-
-    # Load ERC721 ABI and encode the transfer call
-    erc721_abi = load_erc721_abi()
-    calldata = encode_function_call(
-        abi=erc721_abi,
-        function_name="transferFrom",
-        args=[
-            multisig,  # from: address (current owner)
-            position.user_address,  # to: address (original user)
-            position.token_id,  # tokenId: uint256
-        ],
-    )
-
-    return TransactionCall(
-        to=nft_contract,
-        data=calldata,
-        value=0,
-        gas_estimate=estimate_transfer_gas(position),
-        description=f"transferFrom({multisig}, {position.user_address}, {position.token_id})",
-    )
-
-
-def _greedy_bin_pack(
-    calls: list[TransactionCall],
+    current_deposit_cap_wei: int = 0,
     gas_limit: int = EFFECTIVE_GAS_LIMIT,
 ) -> list[TransactionBatch]:
-    """Apply greedy bin-packing to create transaction batches.
+    """Create deposit batches: [setDepositCap, deposit, mint?, deposit, mint?, ...]
 
-    The greedy algorithm adds transactions to the current batch until
-    adding another would exceed the gas limit, then starts a new batch.
+    Each batch:
+      1. setDepositCap(currentCap + sum_of_this_batch_deposits)
+      2. For each user in batch: deposit() then mint() if debt > 0
 
-    Args:
-        calls: List of transaction calls to batch
-        gas_limit: Maximum gas per batch (default: 15.2M with 5% buffer)
+    Token IDs are not known at batching time (they're emitted on-chain).
+    The mint() calls use placeholder token_id=0 — the actual IDs must be
+    filled in just before execution by reading the deposit event logs.
 
-    Returns:
-        List of TransactionBatch objects
+    We use a sentinel token_id=999999 as placeholder so the calldata is
+    structurally complete but needs patching before submission.
     """
-    if not calls:
+    from src.transactions import (
+        build_deposit_tx,
+        build_mint_tx,
+        build_set_deposit_cap_tx,
+    )
+
+    if not positions:
         return []
 
     batches: list[TransactionBatch] = []
-    current_batch = TransactionBatch(batch_number=1)
+    current_batch = TransactionBatch(batch_number=1, batch_type="deposit")
+    current_cap = current_deposit_cap_wei
+    batch_deposit_sum = 0
 
-    for call in calls:
-        # Check if adding this call would exceed the limit
-        if current_batch.total_gas + call.gas_estimate > gas_limit:
-            # Start a new batch if current batch has any calls
-            if current_batch.calls:
-                batches.append(current_batch)
-                current_batch = TransactionBatch(batch_number=len(batches) + 1)
+    # Reserve gas for the setDepositCap call that begins each batch
+    current_batch.add_call(
+        TransactionCall(
+            to="",  # placeholder — filled in below
+            data=b"",
+            gas_estimate=GAS_SET_DEPOSIT_CAP,
+            description="setDepositCap(TBD)",
+        )
+    )
 
-        # Add call to current batch
-        current_batch.add_call(call)
+    def _finalize_batch(batch: TransactionBatch, cap_sum: int, cap_base: int) -> TransactionBatch:
+        """Replace the placeholder cap call with a real one."""
+        new_cap = cap_base + cap_sum
+        cap_tx = build_set_deposit_cap_tx(alchemist_address, new_cap)
+        batch.calls[0] = cap_tx
+        batch.deposit_sum_wei = cap_sum
+        return batch
 
-    # Don't forget the last batch
+    def _start_new_batch(n: int, cap_base: int) -> tuple[TransactionBatch, int]:
+        b = TransactionBatch(batch_number=n, batch_type="deposit")
+        b.add_call(
+            TransactionCall(
+                to="",
+                data=b"",
+                gas_estimate=GAS_SET_DEPOSIT_CAP,
+                description="setDepositCap(TBD)",
+            )
+        )
+        return b, 0
+
+    for position in positions:
+        pos_gas = gas_per_position_in_deposit_batch(position)
+
+        # Would this position overflow the current batch?
+        if current_batch.total_gas + pos_gas > gas_limit and len(current_batch.calls) > 1:
+            batches.append(_finalize_batch(current_batch, batch_deposit_sum, current_cap))
+            current_cap += batch_deposit_sum
+            current_batch, batch_deposit_sum = _start_new_batch(len(batches) + 1, current_cap)
+
+        # Add deposit
+        dep_tx = build_deposit_tx(position, alchemist_address, multisig)
+        current_batch.add_call(dep_tx)
+        batch_deposit_sum += position.deposit_amount_wei
+
+        # Add mint if debt user (token_id placeholder — must be patched before submission)
+        if position.is_debt_user:
+            PLACEHOLDER_TOKEN_ID = 999_999
+            mint_tx = build_mint_tx(position, alchemist_address, multisig, PLACEHOLDER_TOKEN_ID)
+            current_batch.add_call(mint_tx)
+
+    # Flush last batch
+    if len(current_batch.calls) > 1:
+        batches.append(_finalize_batch(current_batch, batch_deposit_sum, current_cap))
+
+    return batches
+
+
+def create_burn_batches(
+    debt_positions: list[PositionMigration],
+    alchemist_address: str,
+    gas_limit: int = EFFECTIVE_GAS_LIMIT,
+) -> list[TransactionBatch]:
+    """Create burn batches: one burn(amount, tokenId) per debt user.
+
+    Token IDs are placeholders (999999) — must be patched before submission
+    based on actual token IDs from deposit events.
+
+    These batches are executed AFTER all deposit batches are complete and
+    token IDs are known.
+    """
+    from src.transactions import build_burn_tx
+
+    if not debt_positions:
+        return []
+
+    batches: list[TransactionBatch] = []
+    current_batch = TransactionBatch(batch_number=1, batch_type="burn")
+
+    PLACEHOLDER_TOKEN_ID = 999_999
+
+    for position in debt_positions:
+        burn_tx = build_burn_tx(
+            token_id=PLACEHOLDER_TOKEN_ID,
+            burn_amount_wei=position.mint_amount_wei,
+            alchemist_address=alchemist_address,
+            user_address=position.user_address,
+        )
+
+        if current_batch.total_gas + burn_tx.gas_estimate > gas_limit and current_batch.calls:
+            batches.append(current_batch)
+            current_batch = TransactionBatch(batch_number=len(batches) + 1, batch_type="burn")
+
+        current_batch.add_call(burn_tx)
+
     if current_batch.calls:
         batches.append(current_batch)
 
     return batches
 
 
-def create_batches(
-    positions: list[PositionMigration],
-    chain: str,
-    chain_config: dict[str, str] | None = None,
+def create_credit_batches(
+    credit_positions: list[PositionMigration],
+    al_token_address: str,
     gas_limit: int = EFFECTIVE_GAS_LIMIT,
 ) -> list[TransactionBatch]:
-    """Create optimally-batched transaction lists for position migration.
+    """Create credit batches: alToken.transfer(user, creditAmount) per credit user.
 
-    This implements the batching strategy from CLAUDE.md:
-    - Process ALL deposits first, then ALL mints, then ALL transfers
-    - Group similar operations for more predictable gas estimation
-    - Each batch stays under ~16M gas (with 5% buffer)
-
-    Args:
-        positions: List of positions to migrate
-        chain: Chain name (for configuration lookup)
-        chain_config: Optional chain configuration dict. If not provided,
-                      placeholder addresses are used.
-        gas_limit: Maximum gas per batch (default: 15.2M with 5% buffer)
-
-    Returns:
-        List of TransactionBatch objects containing all migration calls
+    These send alAssets from the multisig to users who had negative debt in V2.
+    Executed before burn batches (so the multisig has enough alAssets).
     """
+    from src.transactions import build_altoken_transfer_tx
+
+    if not credit_positions:
+        return []
+
+    batches: list[TransactionBatch] = []
+    current_batch = TransactionBatch(batch_number=1, batch_type="credit")
+
+    for position in credit_positions:
+        tx = build_altoken_transfer_tx(
+            al_token_address=al_token_address,
+            recipient=position.user_address,
+            amount_wei=position.credit_amount_wei,
+            user_address=position.user_address,
+        )
+
+        if current_batch.total_gas + tx.gas_estimate > gas_limit and current_batch.calls:
+            batches.append(current_batch)
+            current_batch = TransactionBatch(batch_number=len(batches) + 1, batch_type="credit")
+
+        current_batch.add_call(tx)
+
+    if current_batch.calls:
+        batches.append(current_batch)
+
+    return batches
+
+
+def create_transfer_batches(
+    positions: list[PositionMigration],
+    nft_address: str,
+    multisig: str,
+    gas_limit: int = EFFECTIVE_GAS_LIMIT,
+) -> list[TransactionBatch]:
+    """Create NFT transfer batches: transferFrom(multisig, user, tokenId) per user.
+
+    Token IDs are placeholders (999999) — must be patched before submission.
+    Executed last, after team verification.
+    """
+    from src.transactions import build_nft_transfer_tx
+
     if not positions:
         return []
 
-    # Use provided config or placeholders
-    if chain_config is None:
-        # Import here to avoid circular dependency
-        from src.config import get_chain_config
+    batches: list[TransactionBatch] = []
+    current_batch = TransactionBatch(batch_number=1, batch_type="transfer")
 
-        try:
-            chain_config = get_chain_config(chain)
-        except ValueError:
-            # Use empty placeholders if chain not configured
-            chain_config = {
-                "multisig": "",
-                "cdp_usd": "",
-                "cdp_eth": "",
-                "nft_usd": "",
-                "nft_eth": "",
-            }
+    PLACEHOLDER_TOKEN_ID = 999_999
 
-    multisig = chain_config.get("multisig", "")
-
-    # Group positions by asset type for contract address lookup
-    def get_cdp_contract(asset_type: str) -> str:
-        if asset_type == "USD":
-            return chain_config.get("cdp_usd", "")
-        return chain_config.get("cdp_eth", "")
-
-    def get_nft_contract(asset_type: str) -> str:
-        if asset_type == "USD":
-            return chain_config.get("nft_usd", "")
-        return chain_config.get("nft_eth", "")
-
-    # Build all transaction calls in order: deposits -> mints -> transfers
-    all_calls: list[TransactionCall] = []
-
-    # Step 1: ALL deposits first
     for position in positions:
-        cdp_contract = get_cdp_contract(position.asset_type)
-        call = _create_deposit_call(position, cdp_contract, multisig)
-        all_calls.append(call)
+        tx = build_nft_transfer_tx(
+            nft_address=nft_address,
+            multisig=multisig,
+            user_address=position.user_address,
+            token_id=PLACEHOLDER_TOKEN_ID,
+        )
 
-    # Step 2: ALL mints second
-    for position in positions:
-        cdp_contract = get_cdp_contract(position.asset_type)
-        call = _create_mint_call(position, cdp_contract)
-        all_calls.append(call)
+        if current_batch.total_gas + tx.gas_estimate > gas_limit and current_batch.calls:
+            batches.append(current_batch)
+            current_batch = TransactionBatch(batch_number=len(batches) + 1, batch_type="transfer")
 
-    # Step 3: ALL transfers last
-    for position in positions:
-        nft_contract = get_nft_contract(position.asset_type)
-        call = _create_transfer_call(position, nft_contract, multisig)
-        all_calls.append(call)
+        current_batch.add_call(tx)
 
-    # Apply greedy bin-packing
-    return _greedy_bin_pack(all_calls, gas_limit)
+    if current_batch.calls:
+        batches.append(current_batch)
+
+    return batches
+
+
+def build_migration_plan(
+    positions: list[PositionMigration],
+    chain: str,
+    alchemist_address: str,
+    al_token_address: str,
+    nft_address: str,
+    multisig: str,
+    current_deposit_cap_wei: int = 0,
+    gas_limit: int = EFFECTIVE_GAS_LIMIT,
+) -> "MigrationPlan":
+    """Build the complete migration plan for one asset type on one chain.
+
+    Returns a MigrationPlan with all four batch phases:
+      1. deposit_batches  — [setDepositCap, deposit, mint?] per user
+      2. credit_batches   — alToken.transfer to credit users (uses minted pool)
+      3. burn_batches     — burn alAssets per debt user position
+      4. transfer_batches — NFT transferFrom to each user
+
+    Phase ordering:
+      deposit → credit → burn → transfer
+      (credit before burn so multisig holds sufficient alAssets when distributing)
+    """
+    from src.types import AssetType, MigrationPlan
+
+    asset_type = positions[0].asset_type if positions else AssetType.USD
+
+    plan = MigrationPlan(chain=chain, asset_type=asset_type, positions=positions)
+
+    plan.deposit_batches = create_deposit_batches(
+        positions, alchemist_address, al_token_address, multisig,
+        current_deposit_cap_wei, gas_limit,
+    )
+
+    plan.credit_batches = create_credit_batches(
+        plan.credit_users, al_token_address, gas_limit,
+    )
+
+    plan.burn_batches = create_burn_batches(
+        plan.debt_users, alchemist_address, gas_limit,
+    )
+
+    plan.transfer_batches = create_transfer_batches(
+        positions, nft_address, multisig, gas_limit,
+    )
+
+    return plan
 
 
 def calculate_batch_statistics(batches: list[TransactionBatch]) -> dict:
-    """Calculate summary statistics for a set of batches.
-
-    Args:
-        batches: List of transaction batches
-
-    Returns:
-        Dictionary with statistics
-    """
     if not batches:
         return {
             "total_batches": 0,
@@ -413,20 +324,18 @@ def calculate_batch_statistics(batches: list[TransactionBatch]) -> dict:
         }
 
     total_gas = sum(b.total_gas for b in batches)
-    batch_gases = [b.total_gas for b in batches]
-    total_transactions = sum(len(b.calls) for b in batches)
+    gases = [b.total_gas for b in batches]
+    total_txns = sum(len(b.calls) for b in batches)
 
     return {
         "total_batches": len(batches),
-        "total_transactions": total_transactions,
+        "total_transactions": total_txns,
         "total_gas": total_gas,
-        "avg_gas_per_batch": total_gas // len(batches) if batches else 0,
-        "max_gas_batch": max(batch_gases),
-        "min_gas_batch": min(batch_gases),
+        "avg_gas_per_batch": total_gas // len(batches),
+        "max_gas_batch": max(gases),
+        "min_gas_batch": min(gases),
         "gas_utilization_percent": (
             (total_gas / (len(batches) * EFFECTIVE_GAS_LIMIT)) * 100
-            if batches
-            else 0.0
         ),
     }
 
@@ -435,58 +344,35 @@ def verify_batch_gas_limits(
     batches: list[TransactionBatch],
     gas_limit: int = EFFECTIVE_GAS_LIMIT,
 ) -> tuple[bool, list[str]]:
-    """Verify all batches are within the gas limit.
-
-    Args:
-        batches: List of transaction batches to verify
-        gas_limit: Maximum allowed gas per batch
-
-    Returns:
-        Tuple of (all_valid, list of error messages)
-    """
-    errors: list[str] = []
-
+    errors = []
     for batch in batches:
         if batch.total_gas > gas_limit:
             errors.append(
-                f"Batch {batch.batch_number} exceeds gas limit: "
+                f"Batch {batch.batch_number} ({batch.batch_type}) exceeds gas limit: "
                 f"{batch.total_gas:,} > {gas_limit:,}"
             )
-
     return len(errors) == 0, errors
 
 
 def format_batch_summary(batches: list[TransactionBatch]) -> str:
-    """Format a human-readable summary of batches.
-
-    Args:
-        batches: List of transaction batches
-
-    Returns:
-        Formatted string summary
-    """
     stats = calculate_batch_statistics(batches)
-
     lines = [
         "=" * 50,
         "BATCH SUMMARY",
         "=" * 50,
-        f"Total batches: {stats['total_batches']}",
+        f"Total batches:      {stats['total_batches']}",
         f"Total transactions: {stats['total_transactions']}",
-        f"Total gas: {stats['total_gas']:,}",
-        f"Average gas per batch: {stats['avg_gas_per_batch']:,}",
-        f"Gas limit per batch: {EFFECTIVE_GAS_LIMIT:,}",
-        f"Gas utilization: {stats['gas_utilization_percent']:.1f}%",
+        f"Total gas:          {stats['total_gas']:,}",
+        f"Avg gas per batch:  {stats['avg_gas_per_batch']:,}",
+        f"Gas limit per batch:{EFFECTIVE_GAS_LIMIT:,}",
+        f"Gas utilization:    {stats['gas_utilization_percent']:.1f}%",
         "",
     ]
-
     for batch in batches:
-        utilization = (batch.total_gas / EFFECTIVE_GAS_LIMIT) * 100
+        util = (batch.total_gas / EFFECTIVE_GAS_LIMIT) * 100
         lines.append(
-            f"Batch {batch.batch_number}: {len(batch.calls)} txns, "
-            f"{batch.total_gas:,} gas ({utilization:.1f}%)"
+            f"  [{batch.batch_type:8}] Batch {batch.batch_number}: "
+            f"{len(batch.calls)} txns, {batch.total_gas:,} gas ({util:.1f}%)"
         )
-
     lines.append("=" * 50)
-
     return "\n".join(lines)

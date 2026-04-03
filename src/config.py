@@ -1,66 +1,101 @@
-"""Chain and asset configuration for CDP migration.
+"""Chain and asset configuration for V3 migration.
 
-This module contains all chain-specific addresses and configuration.
-Addresses are placeholders and must be filled in before migration.
+Addresses are placeholders until deployment. The multisig addresses
+are already known (provided by scoopy).
 """
 
 from pathlib import Path
 from typing import TypedDict
 
-from src.types import AssetType, ChainName
+from src.types import AssetType
+
+
+class AssetConfig(TypedDict):
+    """Configuration for one asset type within a chain."""
+
+    alchemist: str      # AlchemistV3 contract for this asset
+    myt: str            # MYT token (USDCMYT or WETHMYT)
+    al_token: str       # alUSD or alETH token
+    underlying: str     # USDC or WETH
 
 
 class ChainConfig(TypedDict):
     """Configuration for a single chain."""
 
     chain_id: int
-    multisig: str  # Temporary migration multisig
-    cdp_usd: str  # CDP contract for USD positions (deposit/mint)
-    cdp_eth: str  # CDP contract for ETH positions (deposit/mint)
-    nft_usd: str  # NFT contract for USD positions (transfer)
-    nft_eth: str  # NFT contract for ETH positions (transfer)
-    collateral_usd: str  # USD collateral token address
-    collateral_eth: str  # ETH collateral token address (or WETH)
+    multisig: str                   # Migration multisig — known
+    usd: AssetConfig               # USDC → alUSD path
+    eth: AssetConfig               # WETH → alETH path
 
 
-# Chain configurations with placeholder addresses
-# TODO: Fill in actual contract addresses before migration
+# Gas configuration
+GAS_LIMIT = 16_000_000
+GAS_TARGET_PERCENT = 0.90          # Target 90% of gas limit per batch
+EFFECTIVE_GAS_LIMIT = int(GAS_LIMIT * GAS_TARGET_PERCENT)  # 14,400,000
+
+# Gas estimates per operation type
+GAS_SET_DEPOSIT_CAP = 35_000       # setDepositCap() — cheap admin setter
+GAS_DEPOSIT = 175_000              # deposit(amount, multisig, 0) — mints NFT + transfers MYT
+GAS_MINT = 130_000                 # mint(tokenId, amount, multisig) — mints alAssets
+GAS_BURN = 120_000                 # burn(amount, tokenId) on Alchemist — burns alAssets, clears debt
+GAS_TRANSFER_ALTOKEN = 65_000      # alToken.transfer(user, amount) — send credit to user
+GAS_TRANSFER_NFT = 70_000          # ERC721.transferFrom(multisig, user, tokenId)
+
+# Large position surcharge (> 1000 tokens in wei)
+LARGE_POSITION_THRESHOLD = 10 ** 21
+GAS_LARGE_POSITION_SURCHARGE = 15_000
+
+
 CHAINS: dict[str, ChainConfig] = {
     "mainnet": {
         "chain_id": 1,
-        "multisig": "",  # Temporary migration multisig
-        "cdp_usd": "",  # CDP contract for USD positions (deposit/mint)
-        "cdp_eth": "",  # CDP contract for ETH positions (deposit/mint)
-        "nft_usd": "",  # NFT contract for USD positions (transfer)
-        "nft_eth": "",  # NFT contract for ETH positions (transfer)
-        "collateral_usd": "",  # USD collateral token address
-        "collateral_eth": "",  # ETH collateral token address (or WETH)
+        "multisig": "0xF56D660138815fC5d7a06cd0E1630225E788293D",
+        "usd": {
+            "alchemist": "",    # TBD — not yet deployed
+            "myt": "",
+            "al_token": "",
+            "underlying": "",
+        },
+        "eth": {
+            "alchemist": "",
+            "myt": "",
+            "al_token": "",
+            "underlying": "",
+        },
     },
     "optimism": {
         "chain_id": 10,
-        "multisig": "",
-        "cdp_usd": "",
-        "cdp_eth": "",
-        "nft_usd": "",
-        "nft_eth": "",
-        "collateral_usd": "",
-        "collateral_eth": "",
+        "multisig": "0x3Dda174aa9E897e18b8E10e6Ce39c2a52398181d",
+        "usd": {
+            "alchemist": "",
+            "myt": "",
+            "al_token": "",
+            "underlying": "",
+        },
+        "eth": {
+            "alchemist": "",
+            "myt": "",
+            "al_token": "",
+            "underlying": "",
+        },
     },
     "arbitrum": {
         "chain_id": 42161,
-        "multisig": "",
-        "cdp_usd": "",
-        "cdp_eth": "",
-        "nft_usd": "",
-        "nft_eth": "",
-        "collateral_usd": "",
-        "collateral_eth": "",
+        "multisig": "0xeE1Aa1C3D0622fCeD823c7720cf9E8079558484b",
+        "usd": {
+            "alchemist": "",
+            "myt": "",
+            "al_token": "",
+            "underlying": "",
+        },
+        "eth": {
+            "alchemist": "",
+            "myt": "",
+            "al_token": "",
+            "underlying": "",
+        },
     },
 }
-
-# Gas configuration
-GAS_BATCH_LIMIT = 15_200_000  # 16M with 5% buffer
-GAS_HEADROOM_PERCENT = 5
 
 # Project paths
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -68,228 +103,77 @@ DATA_DIR = PROJECT_ROOT / "data"
 CONTRACTS_DIR = PROJECT_ROOT / "contracts"
 LOGS_DIR = PROJECT_ROOT / "logs"
 
-# ABI file paths
-CDP_ABI_PATH = CONTRACTS_DIR / "cdp_abi.json"
+# ABI paths
+ALCHEMIST_ABI_PATH = CONTRACTS_DIR / "alchemist_abi.json"
 ERC721_ABI_PATH = CONTRACTS_DIR / "erc721_abi.json"
+ALTOKEN_ABI_PATH = CONTRACTS_DIR / "altoken_abi.json"
+
+VALID_CHAINS = tuple(CHAINS.keys())
 
 
 def get_chain_config(chain: str) -> ChainConfig:
-    """Get configuration for a specific chain.
-
-    Args:
-        chain: Chain name (mainnet, optimism, arbitrum)
-
-    Returns:
-        Chain configuration dictionary
-
-    Raises:
-        ValueError: If chain is not supported
-    """
     chain_lower = chain.lower()
     if chain_lower not in CHAINS:
-        supported = ", ".join(CHAINS.keys())
-        raise ValueError(f"Unsupported chain: {chain}. Supported chains: {supported}")
+        raise ValueError(f"Unsupported chain: {chain}. Supported: {', '.join(CHAINS)}")
     return CHAINS[chain_lower]
 
 
-def get_cdp_contract_address(chain: str, asset_type: str) -> str:
-    """Get the CDP contract address for a chain and asset type.
-
-    Args:
-        chain: Chain name
-        asset_type: Asset type (USD or ETH)
-
-    Returns:
-        Contract address string
-    """
+def get_asset_config(chain: str, asset_type: AssetType) -> AssetConfig:
     config = get_chain_config(chain)
-    if asset_type.upper() == AssetType.USD.value:
-        return config["cdp_usd"]
-    elif asset_type.upper() == AssetType.ETH.value:
-        return config["cdp_eth"]
-    else:
-        raise ValueError(f"Unsupported asset type: {asset_type}")
-
-
-def get_nft_contract_address(chain: str, asset_type: str) -> str:
-    """Get the NFT contract address for a chain and asset type.
-
-    Args:
-        chain: Chain name
-        asset_type: Asset type (USD or ETH)
-
-    Returns:
-        Contract address string
-    """
-    config = get_chain_config(chain)
-    if asset_type.upper() == AssetType.USD.value:
-        return config["nft_usd"]
-    elif asset_type.upper() == AssetType.ETH.value:
-        return config["nft_eth"]
-    else:
-        raise ValueError(f"Unsupported asset type: {asset_type}")
-
-
-def get_csv_path(chain: str) -> Path:
-    """Get the CSV file path for a specific chain.
-
-    Args:
-        chain: Chain name
-
-    Returns:
-        Path to the CSV file
-    """
-    # Validate chain name first
-    get_chain_config(chain)
-    return DATA_DIR / f"{chain.lower()}.csv"
-
-
-def validate_chain_config(chain: str) -> list[str]:
-    """Validate that all required addresses are configured for a chain.
-
-    Args:
-        chain: Chain name
-
-    Returns:
-        List of missing configuration fields (empty if all configured)
-    """
-    config = get_chain_config(chain)
-    missing = []
-
-    required_fields = [
-        "multisig",
-        "cdp_usd",
-        "cdp_eth",
-        "nft_usd",
-        "nft_eth",
-        "collateral_usd",
-        "collateral_eth",
-    ]
-
-    for field in required_fields:
-        if not config.get(field):
-            missing.append(field)
-
-    return missing
+    key = "usd" if asset_type == AssetType.USD else "eth"
+    return config[key]
 
 
 def get_supported_chains() -> list[str]:
-    """Get list of supported chain names.
-
-    Returns:
-        List of chain name strings
-    """
     return list(CHAINS.keys())
 
 
-# Valid chain names constant
-VALID_CHAINS = ("mainnet", "optimism", "arbitrum")
+def get_csv_path(chain: str, asset_type: AssetType) -> Path:
+    """Return path for alAssetValues-sum-and-debt-chain.csv."""
+    get_chain_config(chain)  # validate chain
+    prefix = "alUSD" if asset_type == AssetType.USD else "alETH"
+    return DATA_DIR / f"{prefix}Values-sum-and-debt-{chain.lower()}.csv"
+
+
+def validate_asset_config(chain: str, asset_type: AssetType) -> list[str]:
+    """Return list of empty/missing fields in the asset config."""
+    asset = get_asset_config(chain, asset_type)
+    missing = []
+    for field in ("alchemist", "myt", "al_token", "underlying"):
+        if not asset.get(field):
+            missing.append(field)
+    return missing
 
 
 class ChainConfigError(Exception):
-    """Raised when chain configuration is invalid or incomplete."""
-
-    def __init__(self, chain: str, missing_fields: list[str], message: str = ""):
+    def __init__(self, chain: str, missing_fields: list[str]):
         self.chain = chain
         self.missing_fields = missing_fields
-        self.message = message or f"Chain '{chain}' configuration incomplete. Missing or empty: {', '.join(missing_fields)}"
-        super().__init__(self.message)
+        super().__init__(
+            f"Chain '{chain}' configuration incomplete. Missing: {', '.join(missing_fields)}"
+        )
 
 
 def is_valid_address(address: str) -> bool:
-    """Check if an address is valid (non-empty and properly formatted).
-
-    Args:
-        address: Address string to validate
-
-    Returns:
-        True if valid, False otherwise
-    """
     if not address or not isinstance(address, str):
         return False
-    # Must start with 0x and have 40 hex characters after
     if not address.startswith("0x"):
         return False
     if len(address) != 42:
         return False
     try:
-        int(address, 16)
+        int(address[2:], 16)
         return True
     except ValueError:
         return False
 
 
-def verify_chain_config(
-    chain: str,
-    has_usd_positions: bool = True,
-    has_eth_positions: bool = True,
-    require_all: bool = False,
-) -> None:
-    """Verify that required chain configuration is set before execution.
-
-    This function verifies that the chain configuration has valid addresses
-    for the operations that will be performed. It raises an error if any
-    required addresses are missing or placeholder.
-
-    Args:
-        chain: Chain name (mainnet, optimism, arbitrum)
-        has_usd_positions: Whether there are USD positions to migrate
-        has_eth_positions: Whether there are ETH positions to migrate
-        require_all: If True, verify all addresses regardless of position types
-
-    Raises:
-        ChainConfigError: If required configuration is missing or invalid
-        ValueError: If chain is not supported
-
-    Required addresses:
-    - multisig: Always required
-    - cdp_usd / nft_usd: Required if has_usd_positions
-    - cdp_eth / nft_eth: Required if has_eth_positions
-    """
-    config = get_chain_config(chain)
-    missing = []
-
-    # Multisig is always required
-    if not is_valid_address(config.get("multisig", "")):
-        missing.append("multisig")
-
-    # Check USD-specific addresses if needed
-    if has_usd_positions or require_all:
-        if not is_valid_address(config.get("cdp_usd", "")):
-            missing.append("cdp_usd")
-        if not is_valid_address(config.get("nft_usd", "")):
-            missing.append("nft_usd")
-
-    # Check ETH-specific addresses if needed
-    if has_eth_positions or require_all:
-        if not is_valid_address(config.get("cdp_eth", "")):
-            missing.append("cdp_eth")
-        if not is_valid_address(config.get("nft_eth", "")):
-            missing.append("nft_eth")
-
+def verify_asset_config(chain: str, asset_type: AssetType) -> None:
+    """Raise ChainConfigError if required addresses are not set."""
+    missing = validate_asset_config(chain, asset_type)
     if missing:
-        raise ChainConfigError(chain, missing)
+        raise ChainConfigError(chain, [f"{asset_type.value}.{f}" for f in missing])
 
-
-def get_required_config_fields(
-    has_usd_positions: bool = True,
-    has_eth_positions: bool = True,
-) -> list[str]:
-    """Get list of required configuration fields based on position types.
-
-    Args:
-        has_usd_positions: Whether there are USD positions
-        has_eth_positions: Whether there are ETH positions
-
-    Returns:
-        List of required field names
-    """
-    fields = ["multisig"]
-
-    if has_usd_positions:
-        fields.extend(["cdp_usd", "nft_usd"])
-
-    if has_eth_positions:
-        fields.extend(["cdp_eth", "nft_eth"])
-
-    return fields
+    config = get_chain_config(chain)
+    if not is_valid_address(config["multisig"]):
+        raise ChainConfigError(chain, ["multisig"])

@@ -1,91 +1,47 @@
 #!/usr/bin/env python3
-"""CSV validation script for CDP migration.
+"""CSV validation for V3 migration.
 
 Usage:
-    ape run validate --chain mainnet
-
-This script validates CSV data files before migration:
-- Checks file exists and is readable
-- Validates all required columns are present
-- Validates address formats (0x + 40 hex chars)
-- Validates numeric values are non-negative
-- Validates at least one position per row has underlyingValue > 0
-- Checks for duplicate addresses
-- Halts on any invalid row with detailed error messages
+    ape run validate --chain mainnet --asset usd
+    ape run validate --chain optimism --asset eth
 """
 
 import click
 from ape.cli import ape_cli_context
 
-from src.config import (
-    VALID_CHAINS,
-    get_csv_path,
-    get_supported_chains,
-    validate_chain_config,
-)
-from src.validation import (
-    format_validation_errors,
-    validate_csv_file,
-)
+from src.config import get_csv_path, get_supported_chains
+from src.types import AssetType
+from src.validation import format_validation_errors, validate_csv_file
 
 
 @click.command()
-@click.option(
-    "--chain",
-    type=click.Choice(get_supported_chains()),
-    required=True,
-    help="Chain to validate CSV data for",
-)
+@click.option("--chain", type=click.Choice(get_supported_chains()), required=True)
+@click.option("--asset", type=click.Choice(["usd", "eth"]), required=True)
 @ape_cli_context()
-def cli(cli_ctx, chain: str) -> None:
-    """Validate CSV data file for a specific chain.
+def cli(cli_ctx, chain: str, asset: str) -> None:
+    """Validate a migration CSV file for one asset type on one chain."""
+    asset_type = AssetType.USD if asset == "usd" else AssetType.ETH
+    csv_path = get_csv_path(chain, asset_type)
 
-    Validates:
-    - CSV file exists and is readable
-    - All required columns present
-    - Address formats are valid (0x + 40 hex characters)
-    - Numeric values are non-negative
-    - At least one position per row has underlyingValue > 0
-    - No duplicate addresses
-
-    Halts immediately on any validation error.
-    """
-    click.echo(f"Validating CSV data for {chain}...")
-    click.echo("")
-
-    # Check chain configuration
-    missing_config = validate_chain_config(chain)
-    if missing_config:
-        click.echo(
-            click.style(
-                f"Warning: Chain config incomplete. Missing: {', '.join(missing_config)}",
-                fg="yellow",
-            )
-        )
-        click.echo("")
-
-    # Get CSV path
-    csv_path = get_csv_path(chain)
-    click.echo(f"CSV file: {csv_path}")
+    click.echo(f"Validating {csv_path}...")
 
     if not csv_path.exists():
-        click.echo(click.style(f"Error: CSV file not found: {csv_path}", fg="red"))
+        click.echo(click.style(f"Error: file not found: {csv_path}", fg="red"))
         raise SystemExit(1)
 
-    # Validate CSV file
-    result = validate_csv_file(csv_path, chain)
+    result = validate_csv_file(csv_path, chain, asset_type)
 
     if not result.is_valid:
         click.echo("")
         click.echo(click.style(format_validation_errors(result.errors), fg="red"))
         raise SystemExit(1)
 
-    # Success - print summary
-    click.echo("")
-    click.echo(click.style("Validation successful!", fg="green"))
-    click.echo("")
-    click.echo("Summary:")
-    click.echo(f"  Total rows:        {len(result.rows)}")
-    click.echo(f"  Total positions:   {result.total_positions}")
-    click.echo(f"  USD positions:     {result.usd_token_count}")
-    click.echo(f"  ETH positions:     {result.eth_token_count}")
+    click.echo(click.style("\nValidation OK", fg="green"))
+    click.echo(f"  Total positions: {result.total_positions}")
+    click.echo(f"  Debt users:      {result.debt_count}")
+    click.echo(f"  Credit users:    {result.credit_count}")
+    click.echo(f"  Zero-debt:       {result.zero_debt_count}")
+    click.echo(f"  Total deposit:   {result.total_deposit_wei:,} wei")
+    click.echo(f"  Total mint:      {result.total_mint_wei:,} wei")
+    click.echo(f"  Total credit:    {result.total_credit_wei:,} wei")
+    click.echo(f"  Net burn:        {result.total_mint_wei - result.total_credit_wei:,} wei")

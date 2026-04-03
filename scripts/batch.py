@@ -1,170 +1,85 @@
 #!/usr/bin/env python3
-"""Transaction batching script for CDP migration.
+"""Show batching stats for a migration.
 
 Usage:
-    ape run batch --chain mainnet
-
-This script handles the gas-optimized batching of migration transactions:
-- Estimates gas for each transaction type
-- Uses greedy bin-packing to maximize batch efficiency
-- Stays under 16M gas limit with 5% safety buffer
-- Outputs batch statistics
+    ape run batch --chain mainnet --asset usd
+    ape run batch --chain mainnet --asset usd --verbose
 """
 
 import click
 from ape.cli import ape_cli_context
 
 from src.config import (
-    GAS_BATCH_LIMIT,
-    GAS_HEADROOM_PERCENT,
-    VALID_CHAINS,
+    EFFECTIVE_GAS_LIMIT,
+    get_asset_config,
     get_chain_config,
     get_csv_path,
     get_supported_chains,
-    validate_chain_config,
 )
 from src.gas import (
-    EFFECTIVE_GAS_LIMIT,
+    build_migration_plan,
     calculate_batch_statistics,
-    create_batches,
     format_batch_summary,
     verify_batch_gas_limits,
 )
+from src.types import AssetType
 from src.validation import format_validation_errors, validate_csv_file
 
 
 @click.command()
-@click.option(
-    "--chain",
-    type=click.Choice(get_supported_chains()),
-    required=True,
-    help="Chain to batch transactions for",
-)
-@click.option(
-    "--dry-run",
-    is_flag=True,
-    default=True,
-    help="Only calculate batches, don't create Safe transactions",
-)
-@click.option(
-    "--verbose",
-    "-v",
-    is_flag=True,
-    default=False,
-    help="Show detailed batch breakdown",
-)
+@click.option("--chain", type=click.Choice(get_supported_chains()), required=True)
+@click.option("--asset", type=click.Choice(["usd", "eth"]), required=True)
+@click.option("--verbose", "-v", is_flag=True, default=False)
 @ape_cli_context()
-def cli(cli_ctx, chain: str, dry_run: bool, verbose: bool) -> None:
-    """Calculate optimal transaction batches for migration.
+def cli(cli_ctx, chain: str, asset: str, verbose: bool) -> None:
+    """Show batch statistics for a migration (no transactions submitted)."""
+    asset_type = AssetType.USD if asset == "usd" else AssetType.ETH
 
-    This script:
-    1. Loads validated CSV data
-    2. Builds all required transactions (deposit, mint, transfer)
-    3. Estimates gas for each transaction
-    4. Groups transactions into batches under gas limit
-    5. Reports batch statistics
-
-    By default, runs in dry-run mode (no actual transactions created).
-    """
-    click.echo(f"Calculating transaction batches for {chain}...")
-
-    # Check chain configuration
-    missing_config = validate_chain_config(chain)
-    if missing_config:
-        click.echo(
-            click.style(
-                f"Warning: Chain config incomplete. Missing: {', '.join(missing_config)}",
-                fg="yellow",
-            )
-        )
-
-    # Get CSV path
-    csv_path = get_csv_path(chain)
+    csv_path = get_csv_path(chain, asset_type)
     if not csv_path.exists():
-        click.echo(click.style(f"Error: CSV file not found: {csv_path}", fg="red"))
+        click.echo(click.style(f"Error: {csv_path} not found", fg="red"))
         raise SystemExit(1)
 
-    click.echo(f"CSV file: {csv_path}")
-    click.echo(f"Gas limit per batch: {EFFECTIVE_GAS_LIMIT:,} (16M with {GAS_HEADROOM_PERCENT}% buffer)")
-
-    if dry_run:
-        click.echo(click.style("Dry-run mode: No transactions will be created", fg="blue"))
-
-    # Step 1: Validate and load CSV data
-    click.echo("\nValidating CSV data...")
-    validation_result = validate_csv_file(csv_path, chain)
-
-    if not validation_result.is_valid:
-        click.echo(click.style("CSV validation failed!", fg="red"))
-        click.echo(format_validation_errors(validation_result.errors))
+    result = validate_csv_file(csv_path, chain, asset_type)
+    if not result.is_valid:
+        click.echo(click.style(format_validation_errors(result.errors), fg="red"))
         raise SystemExit(1)
 
-    positions = validation_result.positions
-    click.echo(click.style(f"Validated {len(positions)} positions", fg="green"))
-    click.echo(f"  - USD positions: {validation_result.usd_token_count}")
-    click.echo(f"  - ETH positions: {validation_result.eth_token_count}")
-
-    # Step 2: Get chain configuration for contract addresses
     chain_config = get_chain_config(chain)
+    asset_config = get_asset_config(chain, asset_type)
+    multisig = chain_config["multisig"]
+    alchemist = asset_config.get("alchemist") or "0x" + "0" * 40
+    al_token = asset_config.get("al_token") or "0x" + "0" * 40
 
-    # Step 3: Create batches using greedy bin-packing
-    click.echo("\nCreating transaction batches...")
-    batches = create_batches(positions, chain, chain_config)
+    plan = build_migration_plan(
+        positions=result.positions,
+        chain=chain,
+        alchemist_address=alchemist,
+        al_token_address=al_token,
+        nft_address=alchemist,
+        multisig=multisig,
+    )
 
-    # Step 4: Verify all batches are within gas limits
-    all_valid, errors = verify_batch_gas_limits(batches)
-    if not all_valid:
-        click.echo(click.style("Batch verification failed!", fg="red"))
-        for error in errors:
-            click.echo(f"  - {error}")
+    all_batches = (
+        plan.deposit_batches + plan.credit_batches
+        + plan.burn_batches + plan.transfer_batches
+    )
+
+    ok, errors = verify_batch_gas_limits(all_batches)
+    if not ok:
+        for e in errors:
+            click.echo(click.style(f"  {e}", fg="red"))
         raise SystemExit(1)
 
-    # Step 5: Calculate and display statistics
-    stats = calculate_batch_statistics(batches)
-
-    # Count transaction types
-    deposit_count = len(positions)
-    mint_count = len(positions)
-    transfer_count = len(positions)
-
-    click.echo("\n" + "=" * 60)
-    click.echo("BATCHING SUMMARY")
-    click.echo("=" * 60)
-    click.echo(f"Chain: {chain}")
-    click.echo(f"Gas limit per batch: {EFFECTIVE_GAS_LIMIT:,}")
+    click.echo(f"\nChain: {chain} | Asset: {asset_type.value}")
+    click.echo(f"Gas target: {EFFECTIVE_GAS_LIMIT:,} per batch (90% of 16M)")
     click.echo("")
-    click.echo("Positions:")
-    click.echo(f"  Total positions: {len(positions)}")
-    click.echo(f"  USD positions: {validation_result.usd_token_count}")
-    click.echo(f"  ETH positions: {validation_result.eth_token_count}")
-    click.echo("")
-    click.echo("Transactions:")
-    click.echo(f"  Deposit transactions: {deposit_count}")
-    click.echo(f"  Mint transactions: {mint_count}")
-    click.echo(f"  Transfer transactions: {transfer_count}")
-    click.echo(f"  Total transactions: {stats['total_transactions']}")
-    click.echo("")
-    click.echo("Batches:")
-    click.echo(f"  Batch count: {stats['total_batches']}")
-    click.echo(f"  Total gas: {stats['total_gas']:,}")
-    click.echo(f"  Avg gas per batch: {stats['avg_gas_per_batch']:,}")
-    click.echo(f"  Gas utilization: {stats['gas_utilization_percent']:.1f}%")
+    click.echo(format_batch_summary(all_batches))
 
     if verbose:
-        click.echo("")
-        click.echo("Batch Breakdown:")
-        for batch in batches:
-            utilization = (batch.total_gas / EFFECTIVE_GAS_LIMIT) * 100
-            click.echo(
-                f"  Batch {batch.batch_number}: {len(batch.calls)} txns, "
-                f"{batch.total_gas:,} gas ({utilization:.1f}% utilized)"
-            )
-            if verbose:
-                # Show first few transactions in each batch
-                for i, call in enumerate(batch.calls[:3]):
-                    click.echo(f"    - {call.description[:60]}...")
-                if len(batch.calls) > 3:
-                    click.echo(f"    ... and {len(batch.calls) - 3} more")
-
-    click.echo("=" * 60)
-    click.echo(click.style("Batching complete!", fg="green"))
+        for batch in all_batches:
+            click.echo(f"\n  [{batch.batch_type}] Batch {batch.batch_number}:")
+            for i, call in enumerate(batch.calls[:10], 1):
+                click.echo(f"    {i:3}. {call.description[:80]}")
+            if len(batch.calls) > 10:
+                click.echo(f"    ... +{len(batch.calls) - 10} more")

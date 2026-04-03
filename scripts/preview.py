@@ -1,151 +1,65 @@
 #!/usr/bin/env python3
-"""Transaction preview script for CDP migration.
+"""Preview migration plan.
 
 Usage:
-    ape run preview --chain mainnet
-    ape run preview --chain mainnet --verbose
-
-This script generates a human-readable preview of all transactions
-that would be executed during migration, including:
-- Position summary (USD and ETH counts, totals)
-- Transaction batches with gas estimates
-- Individual transaction details (with --verbose)
-- Batch overview and utilization statistics
+    ape run preview --chain mainnet --asset usd
+    ape run preview --chain mainnet --asset eth --verbose
 """
 
 import click
 from ape.cli import ape_cli_context
 
 from src.config import (
-    VALID_CHAINS,
+    get_asset_config,
     get_chain_config,
     get_csv_path,
     get_supported_chains,
-    validate_chain_config,
+    validate_asset_config,
 )
-from src.gas import create_batches
-from src.preview import print_full_preview
+from src.gas import build_migration_plan
+from src.preview import print_migration_plan
+from src.types import AssetType
 from src.validation import format_validation_errors, validate_csv_file
 
 
 @click.command()
-@click.option(
-    "--chain",
-    type=click.Choice(get_supported_chains()),
-    required=True,
-    help="Chain to preview migration for",
-)
-@click.option(
-    "--verbose",
-    "-v",
-    is_flag=True,
-    default=False,
-    help="Show detailed transaction data",
-)
+@click.option("--chain", type=click.Choice(get_supported_chains()), required=True)
+@click.option("--asset", type=click.Choice(["usd", "eth"]), required=True)
+@click.option("--verbose", "-v", is_flag=True, default=False)
 @ape_cli_context()
-def cli(cli_ctx, chain: str, verbose: bool) -> None:
-    """Preview migration transactions for a specific chain.
+def cli(cli_ctx, chain: str, asset: str, verbose: bool) -> None:
+    """Preview the full migration plan for one asset type on one chain."""
+    asset_type = AssetType.USD if asset == "usd" else AssetType.ETH
 
-    Displays:
-    - Total positions to migrate (USD and ETH)
-    - Position value summaries (collateral and debt)
-    - Transaction batches with gas estimates
-    - Individual transaction details (with --verbose)
-    - Summary statistics
-    """
-    click.echo(f"Generating migration preview for {chain}...")
-    click.echo("")
-
-    # Check chain configuration
-    missing_config = validate_chain_config(chain)
-    if missing_config:
-        click.echo(
-            click.style(
-                f"Warning: Chain config incomplete. Missing: {', '.join(missing_config)}",
-                fg="yellow",
-            )
-        )
-        click.echo(
-            click.style(
-                "Preview will use placeholder addresses.",
-                fg="yellow",
-            )
-        )
-        click.echo("")
-
-    # Get CSV path
-    csv_path = get_csv_path(chain)
+    csv_path = get_csv_path(chain, asset_type)
     if not csv_path.exists():
-        click.echo(click.style(f"Error: CSV file not found: {csv_path}", fg="red"))
+        click.echo(click.style(f"Error: {csv_path} not found", fg="red"))
         raise SystemExit(1)
 
-    click.echo(f"CSV file: {csv_path}")
+    missing = validate_asset_config(chain, asset_type)
+    if missing:
+        click.echo(click.style(f"Warning: missing config: {', '.join(missing)} (using placeholders)", fg="yellow"))
 
-    # Step 1: Load and validate CSV
-    click.echo("Validating CSV data...")
-    result = validate_csv_file(csv_path, chain)
-
+    result = validate_csv_file(csv_path, chain, asset_type)
     if not result.is_valid:
-        click.echo("")
         click.echo(click.style(format_validation_errors(result.errors), fg="red"))
         raise SystemExit(1)
 
-    if not result.positions:
-        click.echo(click.style("No positions found in CSV file.", fg="yellow"))
-        raise SystemExit(0)
+    chain_config = get_chain_config(chain)
+    asset_config = get_asset_config(chain, asset_type)
+    multisig = chain_config["multisig"]
 
-    click.echo(
-        click.style(
-            f"Found {len(result.positions)} position(s) to migrate.",
-            fg="green",
-        )
-    )
+    alchemist = asset_config.get("alchemist") or "0x" + "0" * 40
+    al_token = asset_config.get("al_token") or "0x" + "0" * 40
+    nft = alchemist
 
-    # Step 2: Get chain config for contract addresses
-    try:
-        chain_config = get_chain_config(chain)
-    except ValueError:
-        # Use empty config if chain not found
-        chain_config = {
-            "chain_id": 0,
-            "multisig": "",
-            "cdp_usd": "",
-            "cdp_eth": "",
-            "nft_usd": "",
-            "nft_eth": "",
-            "collateral_usd": "",
-            "collateral_eth": "",
-        }
-
-    # Step 3: Create transaction batches
-    click.echo("Creating transaction batches...")
-    batches = create_batches(result.positions, chain, chain_config)
-
-    if not batches:
-        click.echo(click.style("No batches created.", fg="yellow"))
-        raise SystemExit(0)
-
-    # Step 4: Print the full preview
-    print_full_preview(
-        chain=chain,
+    plan = build_migration_plan(
         positions=result.positions,
-        batches=batches,
-        chain_config=chain_config,
-        verbose=verbose,
+        chain=chain,
+        alchemist_address=alchemist,
+        al_token_address=al_token,
+        nft_address=nft,
+        multisig=multisig,
     )
 
-    # Print usage hint
-    click.echo("")
-    if not verbose:
-        click.echo(
-            click.style(
-                "Tip: Use --verbose to see individual transaction details.",
-                fg="blue",
-            )
-        )
-    click.echo(
-        click.style(
-            f"To execute: ape run migrate --chain {chain}",
-            fg="blue",
-        )
-    )
+    print_migration_plan(plan, chain_config, asset_config, verbose=verbose)

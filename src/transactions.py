@@ -1,12 +1,22 @@
-"""Transaction building for CDP migration.
+"""Transaction builders for V3 migration.
 
-This module provides transaction builders that encode function calls
-for the CDP protocol migration:
-- build_deposit_tx: Create deposit transaction for collateral
-- build_mint_tx: Create mint transaction for debt
-- build_transfer_tx: Create NFT transfer transaction
+All functions return TransactionCall objects with encoded calldata.
 
-All builders use the ABI files in contracts/ to properly encode calldata.
+V3 function signatures:
+  AlchemistV3.setDepositCap(uint256 value)
+  AlchemistV3.deposit(uint256 amount, address recipient, uint256 tokenId) → uint256
+  AlchemistV3.mint(uint256 tokenId, uint256 amount, address recipient)
+  AlchemistV3.burn(uint256 amount, uint256 recipientId) → uint256
+  ERC721.transferFrom(address from, address to, uint256 tokenId)
+  alToken.transfer(address to, uint256 amount) → bool
+
+Key notes from contract reading:
+  - deposit(amount, recipient, 0): tokenId=0 triggers NFT auto-mint to recipient
+  - mint(tokenId, amount, multisig): debt goes on position, alAssets to multisig
+  - burn(amount, tokenId): msg.sender must hold alAssets; burns them, reduces position debt
+  - The multisig must call burn() so alAssets must remain in multisig until then
+  - Excess alAssets (after sending credit amounts) are burned via alToken.burn(amount)
+    directly since they don't correspond to a specific position debt anymore
 """
 
 from typing import Any
@@ -14,15 +24,22 @@ from typing import Any
 from eth_abi import encode
 from eth_utils import keccak
 
-from src.abi import load_cdp_abi, load_erc721_abi
-from src.config import ChainConfig
-from src.gas import estimate_deposit_gas, estimate_mint_gas, estimate_transfer_gas
+from src.abi import load_alchemist_abi, load_altoken_abi, load_erc721_abi
+from src.config import (
+    GAS_BURN,
+    GAS_DEPOSIT,
+    GAS_LARGE_POSITION_SURCHARGE,
+    GAS_MINT,
+    GAS_SET_DEPOSIT_CAP,
+    GAS_TRANSFER_ALTOKEN,
+    GAS_TRANSFER_NFT,
+    LARGE_POSITION_THRESHOLD,
+    ChainConfig,
+)
 from src.types import PositionMigration, TransactionCall
 
 
 class TransactionBuildError(Exception):
-    """Raised when a transaction cannot be built."""
-
     pass
 
 
@@ -31,127 +48,91 @@ def encode_function_call(
     function_name: str,
     args: list[Any],
 ) -> bytes:
-    """Encode a function call using the provided ABI.
-
-    This creates the calldata for a smart contract function call by:
-    1. Computing the 4-byte function selector from the function signature
-    2. ABI-encoding the function arguments
-    3. Concatenating selector + encoded args
-
-    Args:
-        abi: Contract ABI as a list of function/event definitions
-        function_name: Name of the function to call
-        args: List of arguments to pass to the function
-
-    Returns:
-        Encoded calldata as bytes
-
-    Raises:
-        TransactionBuildError: If function not found in ABI or encoding fails
-    """
-    # Find the function in the ABI
-    function_def = None
+    """Encode a function call into ABI calldata."""
+    fn = None
     for entry in abi:
         if entry.get("type") == "function" and entry.get("name") == function_name:
-            function_def = entry
+            fn = entry
             break
 
-    if function_def is None:
+    if fn is None:
         raise TransactionBuildError(f"Function '{function_name}' not found in ABI")
 
-    # Extract parameter types
-    inputs = function_def.get("inputs", [])
-    param_types = [inp["type"] for inp in inputs]
+    param_types = [inp["type"] for inp in fn.get("inputs", [])]
 
-    # Validate argument count
     if len(args) != len(param_types):
         raise TransactionBuildError(
-            f"Function '{function_name}' expects {len(param_types)} arguments, "
-            f"got {len(args)}"
+            f"'{function_name}' expects {len(param_types)} args, got {len(args)}"
         )
 
-    # Compute function selector: first 4 bytes of keccak256(signature)
-    signature = f"{function_name}({','.join(param_types)})"
-    selector = keccak(text=signature)[:4]
+    sig = f"{function_name}({','.join(param_types)})"
+    selector = keccak(text=sig)[:4]
 
-    # Encode arguments
     try:
-        encoded_args = encode(param_types, args)
+        encoded = encode(param_types, args)
     except Exception as e:
-        raise TransactionBuildError(
-            f"Failed to encode arguments for '{function_name}': {e}"
-        )
+        raise TransactionBuildError(f"Failed to encode args for '{function_name}': {e}")
 
-    # Return selector + encoded arguments
-    return selector + encoded_args
+    return selector + encoded
+
+
+def _gas_for_deposit(amount_wei: int) -> int:
+    gas = GAS_DEPOSIT
+    if amount_wei >= LARGE_POSITION_THRESHOLD:
+        gas += GAS_LARGE_POSITION_SURCHARGE
+    return gas
+
+
+def _gas_for_mint(amount_wei: int) -> int:
+    gas = GAS_MINT
+    if amount_wei >= LARGE_POSITION_THRESHOLD:
+        gas += GAS_LARGE_POSITION_SURCHARGE
+    return gas
+
+
+def build_set_deposit_cap_tx(
+    alchemist_address: str,
+    new_cap_wei: int,
+) -> TransactionCall:
+    """Build setDepositCap(newCap) to raise the cap before a batch of deposits.
+
+    Args:
+        alchemist_address: AlchemistV3 contract address
+        new_cap_wei: New deposit cap (must be >= current MYT balance of Alchemist)
+    """
+    abi = load_alchemist_abi()
+    data = encode_function_call(abi, "setDepositCap", [new_cap_wei])
+    return TransactionCall(
+        to=alchemist_address,
+        data=data,
+        value=0,
+        gas_estimate=GAS_SET_DEPOSIT_CAP,
+        description=f"setDepositCap({new_cap_wei})",
+    )
 
 
 def build_deposit_tx(
     position: PositionMigration,
-    chain_config: ChainConfig,
+    alchemist_address: str,
+    multisig: str,
 ) -> TransactionCall:
-    """Build a deposit transaction for a position.
+    """Build deposit(amount, multisig, 0).
 
-    The deposit function creates a new CDP position by:
-    1. Transferring collateral to the contract
-    2. Creating position state in storage
-    3. Minting a position NFT to the recipient
-
-    Function signature:
-        deposit(uint256 amount, address recipient, uint256 tokenId) -> uint256
-
-    Args:
-        position: The position to deposit collateral for
-        chain_config: Chain configuration containing contract addresses
-
-    Returns:
-        TransactionCall with encoded calldata and gas estimate
-
-    Raises:
-        TransactionBuildError: If transaction cannot be built
+    tokenId=0 causes the Alchemist to auto-mint a new NFT to the recipient (multisig).
+    The actual tokenId will be emitted in the AlchemistV3PositionNFTMinted event.
     """
-    # Get the appropriate CDP contract address based on asset type from chain_config
-    if position.asset_type == "USD":
-        cdp_contract = chain_config.get("cdp_usd", "")
-    else:
-        cdp_contract = chain_config.get("cdp_eth", "")
-
-    if not cdp_contract:
-        raise TransactionBuildError(
-            f"No CDP contract address configured for {position.chain}/{position.asset_type}"
-        )
-
-    # Multisig receives the NFT initially
-    multisig = chain_config["multisig"]
-    if not multisig:
-        raise TransactionBuildError(
-            f"No multisig address configured for {position.chain}"
-        )
-
-    # Load CDP ABI and encode the deposit call
-    cdp_abi = load_cdp_abi()
-
-    # deposit(amount, recipient, tokenId)
-    calldata = encode_function_call(
-        abi=cdp_abi,
-        function_name="deposit",
-        args=[
-            position.deposit_amount,  # amount: uint256
-            multisig,  # recipient: address
-            position.token_id,  # tokenId: uint256
-        ],
+    abi = load_alchemist_abi()
+    data = encode_function_call(
+        abi, "deposit",
+        [position.deposit_amount_wei, multisig, 0],
     )
-
-    # Estimate gas for this operation
-    gas_estimate = estimate_deposit_gas(position)
-
     return TransactionCall(
-        to=cdp_contract,
-        data=calldata,
+        to=alchemist_address,
+        data=data,
         value=0,
-        gas_estimate=gas_estimate,
+        gas_estimate=_gas_for_deposit(position.deposit_amount_wei),
         description=(
-            f"deposit({position.deposit_amount}, {multisig}, {position.token_id}) "
+            f"deposit({position.deposit_amount_wei}, {multisig}, 0) "
             f"for user {position.user_address}"
         ),
     )
@@ -159,196 +140,132 @@ def build_deposit_tx(
 
 def build_mint_tx(
     position: PositionMigration,
-    chain_config: ChainConfig,
+    alchemist_address: str,
+    multisig: str,
+    token_id: int,
 ) -> TransactionCall:
-    """Build a mint transaction for a position.
+    """Build mint(tokenId, amount, multisig).
 
-    The mint function borrows against an existing position by:
-    1. Checking the position's collateralization ratio
-    2. Updating the position's debt in storage
-    3. Minting debt tokens to the recipient
-
-    Function signature:
-        mint(uint256 tokenId, uint256 amount, address recipient)
+    Mints alAssets against the position. alAssets land in the multisig.
+    Requires: msg.sender == owner of tokenId (multisig).
 
     Args:
-        position: The position to mint debt against
-        chain_config: Chain configuration containing contract addresses
-
-    Returns:
-        TransactionCall with encoded calldata and gas estimate
-
-    Raises:
-        TransactionBuildError: If transaction cannot be built
+        token_id: The actual tokenId returned/emitted from the deposit step.
     """
-    # Get the appropriate CDP contract address based on asset type from chain_config
-    if position.asset_type == "USD":
-        cdp_contract = chain_config.get("cdp_usd", "")
-    else:
-        cdp_contract = chain_config.get("cdp_eth", "")
+    if position.mint_amount_wei == 0:
+        raise TransactionBuildError("Cannot build mint tx for credit/zero-debt user")
 
-    if not cdp_contract:
-        raise TransactionBuildError(
-            f"No CDP contract address configured for {position.chain}/{position.asset_type}"
-        )
-
-    # Load CDP ABI and encode the mint call
-    cdp_abi = load_cdp_abi()
-
-    # mint(tokenId, amount, recipient)
-    # Note: debt tokens go directly to the user, not the multisig
-    calldata = encode_function_call(
-        abi=cdp_abi,
-        function_name="mint",
-        args=[
-            position.token_id,  # tokenId: uint256
-            position.mint_amount,  # amount: uint256
-            position.user_address,  # recipient: address
-        ],
+    abi = load_alchemist_abi()
+    data = encode_function_call(
+        abi, "mint",
+        [token_id, position.mint_amount_wei, multisig],
     )
-
-    # Estimate gas for this operation
-    gas_estimate = estimate_mint_gas(position)
-
     return TransactionCall(
-        to=cdp_contract,
-        data=calldata,
+        to=alchemist_address,
+        data=data,
         value=0,
-        gas_estimate=gas_estimate,
+        gas_estimate=_gas_for_mint(position.mint_amount_wei),
         description=(
-            f"mint({position.token_id}, {position.mint_amount}, {position.user_address})"
+            f"mint({token_id}, {position.mint_amount_wei}, {multisig}) "
+            f"for user {position.user_address}"
         ),
     )
 
 
-def build_transfer_tx(
-    position: PositionMigration,
-    chain_config: ChainConfig,
+def build_burn_tx(
+    token_id: int,
+    burn_amount_wei: int,
+    alchemist_address: str,
+    user_address: str,
 ) -> TransactionCall:
-    """Build an NFT transfer transaction for a position.
+    """Build burn(amount, tokenId) on AlchemistV3.
 
-    The transfer function moves the position NFT from the multisig
-    to the original user who owned the position.
+    Burns alAssets held by msg.sender (multisig) against a specific position's debt.
+    This is how we clear the debt we created during migration.
 
-    Function signature:
-        transferFrom(address from, address to, uint256 tokenId)
+    IMPORTANT: burn() requires:
+      - block.number != lastMintBlock (can't burn same block as mint)
+      - debt > earmarked (unearmarked debt must exist)
+      - amount <= totalSyntheticsIssued - transmuter.totalLocked()
 
-    Args:
-        position: The position whose NFT should be transferred
-        chain_config: Chain configuration containing contract addresses
-
-    Returns:
-        TransactionCall with encoded calldata and gas estimate
-
-    Raises:
-        TransactionBuildError: If transaction cannot be built
+    In practice this is fine since we're doing this after all minting is complete.
     """
-    # Get the appropriate NFT contract address based on asset type from chain_config
-    if position.asset_type == "USD":
-        nft_contract = chain_config.get("nft_usd", "")
-    else:
-        nft_contract = chain_config.get("nft_eth", "")
-
-    if not nft_contract:
-        raise TransactionBuildError(
-            f"No NFT contract address configured for {position.chain}/{position.asset_type}"
-        )
-
-    # Multisig is the current owner of the NFT
-    multisig = chain_config["multisig"]
-    if not multisig:
-        raise TransactionBuildError(
-            f"No multisig address configured for {position.chain}"
-        )
-
-    # Load ERC721 ABI and encode the transfer call
-    erc721_abi = load_erc721_abi()
-
-    # transferFrom(from, to, tokenId)
-    calldata = encode_function_call(
-        abi=erc721_abi,
-        function_name="transferFrom",
-        args=[
-            multisig,  # from: address (current owner)
-            position.user_address,  # to: address (original user)
-            position.token_id,  # tokenId: uint256
-        ],
+    abi = load_alchemist_abi()
+    data = encode_function_call(
+        abi, "burn",
+        [burn_amount_wei, token_id],
     )
-
-    # Estimate gas for this operation
-    gas_estimate = estimate_transfer_gas(position)
-
     return TransactionCall(
-        to=nft_contract,
-        data=calldata,
+        to=alchemist_address,
+        data=data,
         value=0,
-        gas_estimate=gas_estimate,
+        gas_estimate=GAS_BURN,
         description=(
-            f"transferFrom({multisig}, {position.user_address}, {position.token_id})"
+            f"burn({burn_amount_wei}, {token_id}) — clear debt for user {user_address}"
         ),
     )
 
 
-def build_position_transactions(
-    position: PositionMigration,
-    chain_config: ChainConfig,
-) -> tuple[TransactionCall, TransactionCall, TransactionCall]:
-    """Build all three transactions for migrating a single position.
+def build_altoken_transfer_tx(
+    al_token_address: str,
+    recipient: str,
+    amount_wei: int,
+    user_address: str,
+) -> TransactionCall:
+    """Build alToken.transfer(recipient, amount) to send credit to a user.
 
-    This is a convenience function that builds the complete set of
-    transactions needed to migrate one position:
-    1. deposit - create position with collateral
-    2. mint - borrow against position
-    3. transfer - transfer NFT to user
-
-    Args:
-        position: The position to migrate
-        chain_config: Chain configuration containing contract addresses
-
-    Returns:
-        Tuple of (deposit_tx, mint_tx, transfer_tx)
-
-    Raises:
-        TransactionBuildError: If any transaction cannot be built
+    Credit users get alAssets equal to their V2 credit amount.
+    These are sourced from the pool of alAssets minted during migration.
     """
-    deposit_tx = build_deposit_tx(position, chain_config)
-    mint_tx = build_mint_tx(position, chain_config)
-    transfer_tx = build_transfer_tx(position, chain_config)
+    abi = load_altoken_abi()
+    data = encode_function_call(
+        abi, "transfer",
+        [recipient, amount_wei],
+    )
+    return TransactionCall(
+        to=al_token_address,
+        data=data,
+        value=0,
+        gas_estimate=GAS_TRANSFER_ALTOKEN,
+        description=f"alToken.transfer({recipient}, {amount_wei}) — credit for {user_address}",
+    )
 
-    return deposit_tx, mint_tx, transfer_tx
+
+def build_nft_transfer_tx(
+    nft_address: str,
+    multisig: str,
+    user_address: str,
+    token_id: int,
+) -> TransactionCall:
+    """Build ERC721.transferFrom(multisig, user, tokenId).
+
+    Transfers the position NFT from the migration multisig to the original user.
+    Only called after all minting, burning, and credit distribution is verified.
+    """
+    abi = load_erc721_abi()
+    data = encode_function_call(
+        abi, "transferFrom",
+        [multisig, user_address, token_id],
+    )
+    return TransactionCall(
+        to=nft_address,
+        data=data,
+        value=0,
+        gas_estimate=GAS_TRANSFER_NFT,
+        description=f"transferFrom({multisig}, {user_address}, {token_id})",
+    )
 
 
 def validate_transaction_call(tx: TransactionCall) -> list[str]:
-    """Validate a transaction call for common issues.
-
-    Args:
-        tx: The transaction call to validate
-
-    Returns:
-        List of validation error messages (empty if valid)
-    """
     errors = []
-
-    # Check 'to' address
     if not tx.to:
-        errors.append("Transaction 'to' address is empty")
-    elif not tx.to.startswith("0x"):
-        errors.append(f"Invalid 'to' address format: {tx.to}")
-    elif len(tx.to) != 42:
-        errors.append(f"Invalid 'to' address length: {len(tx.to)} (expected 42)")
-
-    # Check calldata
-    if not tx.data:
-        errors.append("Transaction calldata is empty")
-    elif len(tx.data) < 4:
-        errors.append(f"Calldata too short: {len(tx.data)} bytes (minimum 4 for selector)")
-
-    # Check gas estimate
+        errors.append("'to' address is empty")
+    elif not tx.to.startswith("0x") or len(tx.to) != 42:
+        errors.append(f"Invalid 'to' address: {tx.to}")
+    if not tx.data or len(tx.data) < 4:
+        errors.append(f"Calldata too short: {len(tx.data) if tx.data else 0} bytes")
     if tx.gas_estimate <= 0:
         errors.append(f"Invalid gas estimate: {tx.gas_estimate}")
-
-    # Check value is non-negative
     if tx.value < 0:
-        errors.append(f"Negative transaction value: {tx.value}")
-
+        errors.append(f"Negative value: {tx.value}")
     return errors
