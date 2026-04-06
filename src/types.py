@@ -69,23 +69,15 @@ class CSVRow:
 class PositionMigration:
     """One user's position to be migrated — per asset type.
 
-    Step 1 — deposit (phase1.py):
-      deposit(deposit_amount_wei, multisig, 0)  → creates NFT, emits PositionNFTMinted
+    Step 1 — deposit (deposit.py):    deposit(amount, multisig, 0) → creates NFT
+    Step 2 — read IDs (read_ids.py):  reads events → user→tokenId map
+    Step 3 — mint (mint.py):          mint(tokenId, amount, multisig) for DEBT users only
+    Step 4 — verify (verify.py):      check positions match snapshot, credit users = 0 debt
+    Step 5 — distribute (distribute.py): ERC721.transferFrom(multisig, user, tokenId)
+    Step 6 — credit (credit.py):      alToken.transfer(user, credit_amount) for credit users
 
-    Step 2 — read token IDs (read_ids.py):
-      Reads PositionNFTMinted events, maps user → tokenId, writes JSON.
-
-    Step 3 — mint (mint.py):
-      mint(tokenId, mint_amount_wei, multisig) using real tokenIds from the mapping.
-      Applies to BOTH debt users (mint = their debt) AND credit users
-      (mint = their credit_amount, so multisig holds tokens to distribute).
-
-    Step 4 — team verifies positions match snapshot.
-
-    Step 5 — distribute + burn (phase2.py):
-      5a. credit_batches: alToken.transfer(user, credit_amount_wei) for credit users
-      5b. transfer_batches: ERC721.transferFrom(multisig, user, tokenId)
-      5c. final_burn_batch: alToken.burn(total_remaining)
+    Credit users have mint_amount_wei = 0 (no debt on their position).
+    Their alAssets come from the debt users' minted pool. Multisig burns remainder manually.
     """
 
     user_address: Address
@@ -93,7 +85,7 @@ class PositionMigration:
     chain: str
 
     deposit_amount_wei: Wei         # MYT shares to deposit (1:1 with underlying at migration time)
-    mint_amount_wei: Wei            # alAssets to mint; equals credit_amount_wei for credit users (temp debt, burned in Phase 3)
+    mint_amount_wei: Wei            # alAssets to mint (debt users only; 0 for credit users)
     credit_amount_wei: Wei          # alAssets owed to user (0 for pure debt users)
 
     # Assigned at generation time, before batching
@@ -108,11 +100,9 @@ class PositionMigration:
             raise ValueError("mint_amount_wei cannot be negative")
         if self.credit_amount_wei < 0:
             raise ValueError("credit_amount_wei cannot be negative")
-        # NOTE: credit users intentionally have BOTH mint_amount_wei > 0 AND credit_amount_wei > 0.
-        # Phase 1 mints credit_amount_wei to the multisig (creating a temporary debt on their
-        # position), Phase 2 distributes that amount to the user, and Phase 3 burns it back to
-        # clear the temporary debt. Net result: zero debt, math balances. The old guard that
-        # raised ValueError here has been removed to allow this intentional dual-state.
+        # Credit users have mint_amount_wei = 0 (no debt on position) and credit_amount_wei > 0.
+        # Debt users have mint_amount_wei > 0 and credit_amount_wei = 0.
+        # Both should never be > 0 simultaneously.
 
     @property
     def is_debt_user(self) -> bool:
@@ -164,11 +154,14 @@ class TransactionBatch:
 class MigrationPlan:
     """Complete migration plan for one asset type on one chain.
 
-    Step 1 — deposit_batches:  setDepositCap + deposit (creates NFTs, no mint)
-    Step 2 — read_ids:         read AlchemistV3PositionNFTMinted events → token ID map
-    Step 3 — mint_batches:     mint(tokenId, amount, multisig) using real token IDs
-    Step 4 — team verification
-    Step 5 — credit_batches + transfer_batches + final_burn_batch
+    1. deposit_batches  — setDepositCap + deposit (creates NFTs)
+    2. (read_ids)       — read events → token ID map (not a batch)
+    3. mint_batches     — mint alAssets for debt users using real token IDs
+    4. (verify)         — check positions match snapshot (not a batch)
+    5. transfer_batches — send NFTs to users
+    6. credit_batches   — send alAssets to credit users
+
+    Burn is handled manually by the multisig after all scripts complete.
     """
 
     chain: str
@@ -177,9 +170,8 @@ class MigrationPlan:
 
     deposit_batches: list[TransactionBatch] = field(default_factory=list)
     mint_batches: list[TransactionBatch] = field(default_factory=list)
-    credit_batches: list[TransactionBatch] = field(default_factory=list)
     transfer_batches: list[TransactionBatch] = field(default_factory=list)
-    final_burn_batch: "TransactionBatch | None" = None
+    credit_batches: list[TransactionBatch] = field(default_factory=list)
 
     @property
     def total_deposit_wei(self) -> int:
@@ -194,12 +186,10 @@ class MigrationPlan:
         return sum(p.credit_amount_wei for p in self.positions)
 
     @property
-    def total_burn_wei(self) -> int:
-        """alAssets burned directly from multisig via alToken.burn() at end of Script 2.
+    def remaining_to_burn_wei(self) -> int:
+        """alAssets left in multisig after credit distribution = total minted − credits sent.
 
-        = total minted minus what was sent to credit users.
-        = sum of debt users' mint amounts only.
-        Credit users hold their own alAssets and can burn them to clear their position.
+        Burned manually by the multisig (not handled by migration scripts).
         """
         return self.total_mint_wei - self.total_credit_wei
 

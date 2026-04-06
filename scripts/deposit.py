@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""Step 2: Mint alAssets against NFT positions using real token IDs.
+"""Step 1: Deposit MYT and create NFT positions (no mint).
 
 Usage:
-    ape run mint --chain mainnet --asset usd
-    ape run mint --chain mainnet --asset usd --dry-run
+    ape run deposit --chain mainnet --asset usd
+    ape run deposit --chain mainnet --asset usd --dry-run
 
-Run AFTER:
-  1. `ape run deposit` has fully executed on-chain
-  2. `ape run read_ids --from-block N` has written the token ID mapping
+After deposits execute on-chain, run `ape run read_ids` to capture token IDs.
 """
 
 import click
@@ -20,11 +18,14 @@ from src.config import (
     get_csv_path,
     get_effective_gas_limit,
     get_supported_chains,
-    load_token_id_map,
     validate_asset_config,
     verify_asset_config,
 )
-from src.gas import create_mint_batches, format_batch_summary, verify_batch_gas_limits
+from src.gas import (
+    create_deposit_batches,
+    format_batch_summary,
+    verify_batch_gas_limits,
+)
 from src.safe import ProposeToSafe, format_safe_batch
 from src.types import AssetType
 from src.validation import format_validation_errors, validate_csv_file
@@ -47,11 +48,11 @@ def cli(
     dry_run: bool,
     skip_validation: bool,
 ) -> None:
-    """Step 2: Mint alAssets against positions using real token IDs."""
+    """Step 1: Deposit MYT to create NFT positions (minting is separate)."""
     asset_type = AssetType.USD if asset == "usd" else AssetType.ETH
 
     click.echo("=" * 70)
-    click.echo(click.style("ALCHEMIX V3 MIGRATION — MINT", fg="white", bold=True))
+    click.echo(click.style("ALCHEMIX V3 MIGRATION — DEPOSIT", fg="white", bold=True))
     click.echo("=" * 70)
     click.echo(f"Chain:  {click.style(chain, fg='cyan')}")
     click.echo(f"Asset:  {click.style(asset_type.value, fg='cyan')}")
@@ -65,17 +66,6 @@ def cli(
     click.echo(f"Multisig: {multisig or click.style('<not configured>', fg='yellow')}")
     click.echo("-" * 70)
 
-    # Load token ID mapping
-    token_id_map = None
-    try:
-        token_id_map = load_token_id_map(chain, asset_type)
-        click.echo(f"Loaded {len(token_id_map)} token IDs from mapping")
-    except FileNotFoundError as e:
-        if not dry_run:
-            click.echo(click.style(f"\nError: {e}", fg="red"))
-            raise SystemExit(1)
-        click.echo(click.style("Warning: no token ID map — using placeholders for dry run", fg="yellow"))
-
     csv_path = get_csv_path(chain, asset_type)
     if not csv_path.exists():
         click.echo(click.style(f"\nError: CSV not found: {csv_path}", fg="red"))
@@ -85,31 +75,29 @@ def cli(
     # Validate CSV
     click.echo(click.style("\n[1/4] Validating CSV...", fg="cyan", bold=True))
 
-    myt_decimals = asset_config.get("myt_decimals", 18)
-    result = validate_csv_file(csv_path, chain, asset_type, myt_decimals=myt_decimals)
+    if not skip_validation:
+        myt_decimals = asset_config.get("myt_decimals", 18)
+        result = validate_csv_file(csv_path, chain, asset_type, myt_decimals=myt_decimals)
 
-    if not skip_validation and not result.is_valid:
-        click.echo(click.style(format_validation_errors(result.errors), fg="red"))
-        click.echo(click.style("Aborted: CSV validation failed.", fg="red"))
-        raise SystemExit(1)
-
-    mintable = [p for p in result.positions if p.mint_amount_wei > 0]
-    click.echo(click.style("Validation OK", fg="green"))
-    click.echo(f"  Positions to mint: {len(mintable)}")
-    click.echo(f"  Total mint:        {result.total_mint_wei:,} wei")
-
-    if not mintable:
-        click.echo(click.style("No positions need minting.", fg="yellow"))
-        raise SystemExit(0)
-
-    # Verify all mintable positions have token IDs
-    if token_id_map is not None:
-        missing = [p.user_address for p in mintable if p.user_address.lower() not in token_id_map]
-        if missing:
-            click.echo(click.style(f"Error: {len(missing)} positions missing token IDs:", fg="red"))
-            for addr in missing[:5]:
-                click.echo(f"  {addr}")
+        if not result.is_valid:
+            click.echo(click.style(format_validation_errors(result.errors), fg="red"))
+            click.echo(click.style("Aborted: CSV validation failed.", fg="red"))
             raise SystemExit(1)
+
+        click.echo(click.style("Validation OK", fg="green"))
+        click.echo(f"  Total positions: {result.total_positions}")
+        click.echo(f"  Debt users:      {result.debt_count}")
+        click.echo(f"  Credit users:    {result.credit_count}")
+        click.echo(f"  Zero-debt:       {result.zero_debt_count}")
+        click.echo(f"  Total deposit:   {result.total_deposit_wei:,} wei")
+    else:
+        myt_decimals = asset_config.get("myt_decimals", 18)
+        result = validate_csv_file(csv_path, chain, asset_type, myt_decimals=myt_decimals)
+        click.echo(click.style("Skipped detailed validation.", fg="yellow"))
+
+    if not result.positions:
+        click.echo(click.style("No positions found.", fg="yellow"))
+        raise SystemExit(0)
 
     if not dry_run:
         try:
@@ -119,17 +107,20 @@ def cli(
             click.echo(click.style("Use --dry-run to test without configured addresses.", fg="blue"))
             raise SystemExit(1)
     else:
-        missing_cfg = validate_asset_config(chain, asset_type)
-        if missing_cfg:
-            click.echo(click.style(f"Warning: missing config: {', '.join(missing_cfg)}", fg="yellow"))
+        missing = validate_asset_config(chain, asset_type)
+        if missing:
+            click.echo(click.style(f"Warning: missing config: {', '.join(missing)}", fg="yellow"))
 
     alchemist = asset_config.get("alchemist", "") or "0x" + "0" * 40
 
-    # Build mint batches
-    click.echo(click.style("\n[2/4] Building mint batches...", fg="cyan", bold=True))
+    # Build deposit batches
+    click.echo(click.style("\n[2/4] Building deposit batches...", fg="cyan", bold=True))
 
-    batches = create_mint_batches(
-        result.positions, alchemist, multisig, token_id_map or {}, chain=chain,
+    batches = create_deposit_batches(
+        positions=result.positions,
+        alchemist_address=alchemist,
+        multisig=multisig,
+        chain=chain,
     )
 
     ok, errors = verify_batch_gas_limits(batches)
@@ -138,7 +129,7 @@ def cli(
             click.echo(click.style(f"  {err}", fg="red"))
         raise SystemExit(1)
 
-    click.echo(click.style(f"Mint batches: {len(batches)}", fg="green"))
+    click.echo(click.style(f"Deposit batches: {len(batches)}", fg="green"))
     for batch in batches:
         click.echo(f"  Batch {batch.batch_number}: {len(batch.calls)} txns, {batch.total_gas:,} gas")
         if verbose:
@@ -156,19 +147,20 @@ def cli(
     if not yes:
         click.echo(
             click.style("\nWARNING: ", fg="red", bold=True) +
-            f"About to propose {len(batches)} mint Safe tx(s) on {chain} ({asset_type.value})."
+            f"About to propose {len(batches)} deposit Safe tx(s) on {chain} ({asset_type.value}).\n"
+            f"NOTE: This only creates NFT positions (no minting)."
         )
         if dry_run:
             click.echo(click.style("DRY RUN: skipping actual submission.", fg="yellow"))
-        elif not click.confirm("Proceed with minting?"):
+        elif not click.confirm("Proceed with deposits?"):
             click.echo(click.style("Cancelled.", fg="yellow"))
             raise SystemExit(0)
 
     if dry_run:
         click.echo(click.style("\nDRY RUN: skipping Safe proposal.", fg="yellow"))
-        for batch in batches:
+        for i, batch in enumerate(batches, 1):
             click.echo(
-                f"  [mint     ] Batch {batch.batch_number}: "
+                f"  [deposit ] Batch {i}: "
                 f"{len(batch.calls)} txns, {batch.total_gas:,} gas"
             )
         click.echo(click.style("\nDry run complete. Run without --dry-run to execute.", fg="blue"))
@@ -188,9 +180,10 @@ def cli(
     )
 
     click.echo(f"\nStatus: {status}")
-    click.echo(f"Proposed: {ok_count}/{len(results)} mint batches")
+    click.echo(f"Proposed: {ok_count}/{len(results)} deposit batches")
     click.echo(click.style(
-        f"\nNext: run `ape run verify --chain {chain} --asset {asset}` to verify positions.",
+        f"\nNext: run `ape run read_ids --chain {chain} --asset {asset} --from-block <N>` "
+        f"to capture token IDs.",
         fg="cyan",
     ))
 

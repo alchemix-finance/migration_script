@@ -33,23 +33,55 @@ class ChainConfig(TypedDict):
     eth: AssetConfig               # WETH → alETH path
 
 
-# Gas configuration
-GAS_LIMIT = 16_000_000
-GAS_TARGET_PERCENT = 0.90          # Target 90% of gas limit per batch
-EFFECTIVE_GAS_LIMIT = int(GAS_LIMIT * GAS_TARGET_PERCENT)  # 14,400,000
+# Per-chain block gas limits (updated post-Pectra for mainnet, 2025-05)
+CHAIN_GAS_LIMITS: dict[str, int] = {
+    "mainnet": 60_000_000,          # Doubled in recent hardfork
+    "optimism": 30_000_000,
+    "arbitrum": 32_000_000,
+}
+
+# Per-chain max transaction calldata size (bytes)
+CHAIN_TX_SIZE_LIMITS: dict[str, int] = {
+    "mainnet": 131_072,             # 128 KB (geth hard limit)
+    "optimism": 122_880,            # 120 KB
+    "arbitrum": 117_964,            # ~118 KB (90% of 128 KB, DoS protection)
+}
+
+# Batching parameters
+GAS_TARGET_PERCENT = 0.90           # Target 90% of block gas limit per batch
+SIZE_TARGET_PERCENT = 0.90          # Target 90% of max tx size per batch
+MAX_CALLS_PER_BATCH = 50            # Practical cap — keeps batches reviewable in Safe UI
+
+# MultiSend encoding overhead (bytes)
+MULTISEND_WRAPPER_BYTES = 68        # 4 (selector) + 32 (offset) + 32 (length)
+MULTISEND_CALL_BYTES = 85           # 1 (op) + 20 (to) + 32 (value) + 32 (dataLen)
 
 # Gas estimates per operation type
-GAS_SET_DEPOSIT_CAP = 35_000       # setDepositCap() — cheap admin setter
-GAS_DEPOSIT = 175_000              # deposit(amount, multisig, 0) — mints NFT + transfers MYT
-GAS_MINT = 130_000                 # mint(tokenId, amount, multisig) — mints alAssets
-GAS_BURN = 120_000                 # burn(amount, tokenId) on Alchemist — burns alAssets, clears debt
-GAS_TRANSFER_ALTOKEN = 65_000      # alToken.transfer(user, amount) — send credit to user
-GAS_TRANSFER_NFT = 70_000          # ERC721.transferFrom(multisig, user, tokenId)
-GAS_ALTOKEN_BURN = 35_000          # alToken.burn(amount) — ERC20Burnable direct burn
+GAS_SET_DEPOSIT_CAP = 35_000        # setDepositCap() — cheap admin setter
+GAS_DEPOSIT = 175_000               # deposit(amount, multisig, 0) — mints NFT + transfers MYT
+GAS_MINT = 130_000                  # mint(tokenId, amount, multisig) — mints alAssets
+GAS_TRANSFER_ALTOKEN = 65_000       # alToken.transfer(user, amount) — send credit to user
+GAS_TRANSFER_NFT = 70_000           # ERC721.transferFrom(multisig, user, tokenId)
 
 # Large position surcharge (> 1000 tokens in wei)
 LARGE_POSITION_THRESHOLD = 10 ** 21
 GAS_LARGE_POSITION_SURCHARGE = 15_000
+
+
+def get_effective_gas_limit(chain: str) -> int:
+    """90% of the chain's block gas limit."""
+    base = CHAIN_GAS_LIMITS.get(chain.lower(), 30_000_000)
+    return int(base * GAS_TARGET_PERCENT)
+
+
+def get_effective_size_limit(chain: str) -> int:
+    """90% of the chain's max transaction calldata size."""
+    base = CHAIN_TX_SIZE_LIMITS.get(chain.lower(), 117_964)
+    return int(base * SIZE_TARGET_PERCENT)
+
+
+# Legacy alias — used by batch stats display
+EFFECTIVE_GAS_LIMIT = get_effective_gas_limit("mainnet")
 
 
 CHAINS: dict[str, ChainConfig] = {

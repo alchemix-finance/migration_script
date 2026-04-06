@@ -10,15 +10,14 @@ import click
 from ape.cli import ape_cli_context
 
 from src.config import (
-    EFFECTIVE_GAS_LIMIT,
     get_asset_config,
     get_chain_config,
     get_csv_path,
+    get_effective_gas_limit,
     get_supported_chains,
 )
 from src.gas import (
     build_migration_plan,
-    calculate_batch_statistics,
     format_batch_summary,
     verify_batch_gas_limits,
 )
@@ -47,6 +46,7 @@ def cli(cli_ctx, chain: str, asset: str, verbose: bool) -> None:
     if not result.is_valid:
         click.echo(click.style(format_validation_errors(result.errors), fg="red"))
         raise SystemExit(1)
+
     multisig = chain_config["multisig"]
     alchemist = asset_config.get("alchemist") or "0x" + "0" * 40
     al_token = asset_config.get("al_token") or "0x" + "0" * 40
@@ -62,21 +62,20 @@ def cli(cli_ctx, chain: str, asset: str, verbose: bool) -> None:
 
     all_batches = (
         plan.deposit_batches + plan.mint_batches
-        + plan.credit_batches + plan.transfer_batches
-        + ([plan.final_burn_batch] if plan.final_burn_batch else [])
+        + plan.transfer_batches + plan.credit_batches
     )
 
-    ok, errors = verify_batch_gas_limits(all_batches)
+    gas_limit = get_effective_gas_limit(chain)
+    ok, errors = verify_batch_gas_limits(all_batches, chain=chain)
     if not ok:
         for e in errors:
             click.echo(click.style(f"  {e}", fg="red"))
         raise SystemExit(1)
 
     click.echo(f"\nChain: {chain} | Asset: {asset_type.value}")
-    click.echo(f"Gas target: {EFFECTIVE_GAS_LIMIT:,} per batch (90% of 16M)")
-
+    click.echo(f"Gas target: {gas_limit:,} per batch (90% of chain limit)")
     click.echo("")
-    click.echo(format_batch_summary(all_batches))
+    click.echo(format_batch_summary(all_batches, chain=chain))
 
     if verbose:
         for batch in all_batches:

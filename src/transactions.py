@@ -6,17 +6,13 @@ V3 function signatures:
   AlchemistV3.setDepositCap(uint256 value)
   AlchemistV3.deposit(uint256 amount, address recipient, uint256 tokenId) → uint256
   AlchemistV3.mint(uint256 tokenId, uint256 amount, address recipient)
-  AlchemistV3.burn(uint256 amount, uint256 recipientId) → uint256
   ERC721.transferFrom(address from, address to, uint256 tokenId)
   alToken.transfer(address to, uint256 amount) → bool
 
-Key notes from contract reading:
+Key notes:
   - deposit(amount, recipient, 0): tokenId=0 triggers NFT auto-mint to recipient
   - mint(tokenId, amount, multisig): debt goes on position, alAssets to multisig
-  - burn(amount, tokenId): msg.sender must hold alAssets; burns them, reduces position debt
-  - The multisig must call burn() so alAssets must remain in multisig until then
-  - Excess alAssets (after sending credit amounts) are burned via alToken.burn(amount)
-    directly since they don't correspond to a specific position debt anymore
+  - Remaining alAssets in multisig are burned manually by the multisig after migration
 """
 
 from typing import Any
@@ -26,8 +22,6 @@ from eth_utils import keccak
 
 from src.abi import load_alchemist_abi, load_altoken_abi, load_erc721_abi
 from src.config import (
-    GAS_ALTOKEN_BURN,
-    GAS_BURN,
     GAS_DEPOSIT,
     GAS_LARGE_POSITION_SURCHARGE,
     GAS_MINT,
@@ -35,7 +29,6 @@ from src.config import (
     GAS_TRANSFER_ALTOKEN,
     GAS_TRANSFER_NFT,
     LARGE_POSITION_THRESHOLD,
-    ChainConfig,
 )
 from src.types import PositionMigration, TransactionCall
 
@@ -173,39 +166,6 @@ def build_mint_tx(
     )
 
 
-def build_burn_tx(
-    token_id: int,
-    burn_amount_wei: int,
-    alchemist_address: str,
-    user_address: str,
-) -> TransactionCall:
-    """Build burn(amount, tokenId) on AlchemistV3.
-
-    Burns alAssets held by msg.sender (multisig) against a specific position's debt.
-    This is how we clear the debt we created during migration.
-
-    IMPORTANT: burn() requires:
-      - block.number != lastMintBlock (can't burn same block as mint)
-      - debt > earmarked (unearmarked debt must exist)
-      - amount <= totalSyntheticsIssued - transmuter.totalLocked()
-
-    In practice this is fine since we're doing this after all minting is complete.
-    """
-    abi = load_alchemist_abi()
-    data = encode_function_call(
-        abi, "burn",
-        [burn_amount_wei, token_id],
-    )
-    return TransactionCall(
-        to=alchemist_address,
-        data=data,
-        value=0,
-        gas_estimate=GAS_BURN,
-        description=(
-            f"burn({burn_amount_wei}, {token_id}) — clear debt for user {user_address}"
-        ),
-    )
-
 
 def build_altoken_transfer_tx(
     al_token_address: str,
@@ -229,49 +189,6 @@ def build_altoken_transfer_tx(
         value=0,
         gas_estimate=GAS_TRANSFER_ALTOKEN,
         description=f"alToken.transfer({recipient}, {amount_wei}) — credit for {user_address}",
-    )
-
-
-ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
-
-
-def build_altoken_burn_tx(
-    al_token_address: str,
-    amount_wei: int,
-) -> TransactionCall:
-    """Build alToken.burn(amount) — primary path for disposing of leftover alAssets.
-
-    Burns tokens directly on the alToken contract (ERC20Burnable).
-    Does NOT interact with AlchemistV3 — position debts remain on the NFT owners.
-    """
-    abi = load_altoken_abi()
-    data = encode_function_call(abi, "burn", [amount_wei])
-    return TransactionCall(
-        to=al_token_address,
-        data=data,
-        value=0,
-        gas_estimate=GAS_ALTOKEN_BURN,
-        description=f"alToken.burn({amount_wei}) — destroy remaining multisig alAssets",
-    )
-
-
-def build_altoken_transfer_zero_tx(
-    al_token_address: str,
-    amount_wei: int,
-) -> TransactionCall:
-    """Build alToken.transfer(address(0), amount) — fallback if burn() is unavailable.
-
-    Sends remaining alAssets to the zero address as a burn substitute.
-    Use only if alToken.burn() reverts (e.g. contract does not implement ERC20Burnable).
-    """
-    abi = load_altoken_abi()
-    data = encode_function_call(abi, "transfer", [ZERO_ADDRESS, amount_wei])
-    return TransactionCall(
-        to=al_token_address,
-        data=data,
-        value=0,
-        gas_estimate=GAS_TRANSFER_ALTOKEN,
-        description=f"alToken.transfer(0x000...000, {amount_wei}) — fallback burn",
     )
 
 

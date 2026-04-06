@@ -156,11 +156,10 @@ def position_from_row(
     ERC-20s) and are passed through unchanged regardless of myt_decimals.
 
     Debt sign convention:
-      positive → real debt user: mint that amount as alAssets to multisig; no credit.
-      negative → credit user: mint abs(debt) to multisig as a temporary debt (Phase 1),
-                 distribute abs(debt) alAssets to the user (Phase 2), then burn the
-                 temp debt back in Phase 3. Both mint_amount_wei AND credit_amount_wei
-                 are set to abs(debt) — intentional, required for alToken math to balance.
+      positive → debt user: mint that amount as alAssets to multisig; debt stays on position.
+      negative → credit user: NO mint (zero debt on position). credit_amount_wei = abs(debt).
+                 Credit alAssets are sourced from the debt users' mint pool and sent to the
+                 user in the credit script. Multisig burns remaining alAssets manually.
       zero     → deposit only, no mint, no credit.
     """
     scale = 10 ** (18 - myt_decimals)
@@ -168,10 +167,13 @@ def position_from_row(
 
     # Debt is always 18-decimal alToken — pass through as-is, no myt_decimals scaling.
     if row.debt > 0:
+        # Real debt user: mint alAssets to multisig, debt stays on their position.
         mint_wei = int(row.debt)
         credit_wei = 0
     elif row.debt < 0:
-        mint_wei = int(abs(row.debt))
+        # Credit user: NO mint (zero debt on position). Credit alAssets are sourced
+        # from the pool of alAssets minted for debt users and sent separately.
+        mint_wei = 0
         credit_wei = int(abs(row.debt))
     else:
         mint_wei = 0

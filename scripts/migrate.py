@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""Migration entry point — delegates to phase1 and phase2.
+"""Preview the full migration plan (no transactions submitted).
 
-The migration runs in four steps:
+Usage:
+    ape run migrate --chain mainnet --asset usd
+    ape run migrate --chain mainnet --asset usd --verbose
 
-  1. ape run phase1    — deposit MYT, create NFT positions (no mint yet)
-  2. ape run read_ids  — read AlchemistV3PositionNFTMinted events → token ID map
-  3. ape run mint      — mint alAssets using real token IDs from the map
-  4. ape run phase2    — send credits + NFTs to users, burn remaining alAssets
+The migration runs in 5 steps:
+  1. ape run deposit    — deposit MYT, create NFT positions
+  2. ape run read_ids   — read token IDs from deposit events
+     ape run mint       — mint alAsset debt using real token IDs
+  3. ape run verify     — verify positions match snapshot
+  4. ape run distribute — send NFTs to users
+  5. ape run credit     — send alAsset credit to credit users
 
-Run this script for a combined preview of all steps.
+Burn of remaining alAssets is handled manually by the multisig.
 """
 
 import click
@@ -33,17 +38,11 @@ from src.validation import format_validation_errors, validate_csv_file
 @click.option("--verbose", "-v", is_flag=True, default=False)
 @ape_cli_context()
 def cli(cli_ctx, chain: str, asset: str, verbose: bool) -> None:
-    """Preview the full two-script migration plan (no transactions submitted).
-
-    To execute:
-      Script 1:  ape run phase1 --chain <chain> --asset <asset>
-      Script 2:  ape run phase2 --chain <chain> --asset <asset>
-    """
+    """Preview the full migration plan (no transactions submitted)."""
     asset_type = AssetType.USD if asset == "usd" else AssetType.ETH
 
     chain_config = get_chain_config(chain)
     asset_config = get_asset_config(chain, asset_type)
-    multisig = chain_config["multisig"]
 
     csv_path = get_csv_path(chain, asset_type)
     if not csv_path.exists():
@@ -60,41 +59,34 @@ def cli(cli_ctx, chain: str, asset: str, verbose: bool) -> None:
         click.echo(click.style(format_validation_errors(result.errors), fg="red"))
         raise SystemExit(1)
 
-    alchemist = asset_config.get("alchemist", "") or "0x" + "0" * 40
-    al_token = asset_config.get("al_token", "") or "0x" + "0" * 40
-    nft = asset_config.get("nft", "") or "0x" + "0" * 40
-
     plan = build_migration_plan(
         positions=result.positions,
         chain=chain,
-        alchemist_address=alchemist,
-        al_token_address=al_token,
-        nft_address=nft,
-        multisig=multisig,
+        alchemist_address=asset_config.get("alchemist", "") or "0x" + "0" * 40,
+        al_token_address=asset_config.get("al_token", "") or "0x" + "0" * 40,
+        nft_address=asset_config.get("nft", "") or "0x" + "0" * 40,
+        multisig=chain_config["multisig"],
     )
 
     all_batches = (
         plan.deposit_batches + plan.mint_batches
-        + plan.credit_batches + plan.transfer_batches
-        + ([plan.final_burn_batch] if plan.final_burn_batch else [])
+        + plan.transfer_batches + plan.credit_batches
     )
-
-    ok, errors = verify_batch_gas_limits(all_batches)
+    ok, errors = verify_batch_gas_limits(all_batches, chain=chain)
     if not ok:
         for err in errors:
             click.echo(click.style(f"  {err}", fg="red"))
         raise SystemExit(1)
 
-    click.echo(f"\nChain: {chain} | Asset: {asset_type.value}")
-
     print_migration_plan(plan, chain_config, asset_config, verbose=verbose)
 
     click.echo(click.style(
         "\nTo execute:\n"
-        f"  1. ape run phase1 --chain {chain} --asset {asset}\n"
-        f"  2. ape run read_ids --chain {chain} --asset {asset} --from-block <N>\n"
-        f"  3. ape run mint --chain {chain} --asset {asset}\n"
-        f"  4. (team verifies)\n"
-        f"  5. ape run phase2 --chain {chain} --asset {asset}",
+        f"  1. ape run deposit    --chain {chain} --asset {asset}\n"
+        f"  2. ape run read_ids   --chain {chain} --asset {asset} --from-block <N>\n"
+        f"     ape run mint       --chain {chain} --asset {asset}\n"
+        f"  3. ape run verify     --chain {chain} --asset {asset}\n"
+        f"  4. ape run distribute --chain {chain} --asset {asset}\n"
+        f"  5. ape run credit     --chain {chain} --asset {asset}",
         fg="cyan",
     ))
