@@ -9,7 +9,7 @@ Usage:
 import click
 from ape.cli import ape_cli_context
 
-from src.config import get_csv_path, get_supported_chains
+from src.config import get_asset_config, get_csv_path, get_supported_chains
 from src.types import AssetType
 from src.validation import format_validation_errors, validate_csv_file
 
@@ -29,7 +29,9 @@ def cli(cli_ctx, chain: str, asset: str) -> None:
         click.echo(click.style(f"Error: file not found: {csv_path}", fg="red"))
         raise SystemExit(1)
 
-    result = validate_csv_file(csv_path, chain, asset_type)
+    asset_config = get_asset_config(chain, asset_type)
+    token_decimals = asset_config.get("token_decimals", 18)
+    result = validate_csv_file(csv_path, chain, asset_type, token_decimals=token_decimals)
 
     if not result.is_valid:
         click.echo("")

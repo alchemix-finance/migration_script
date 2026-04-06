@@ -40,13 +40,13 @@ def cli(cli_ctx, chain: str, asset: str, verbose: bool) -> None:
         click.echo(click.style(f"Error: {csv_path} not found", fg="red"))
         raise SystemExit(1)
 
-    result = validate_csv_file(csv_path, chain, asset_type)
+    chain_config = get_chain_config(chain)
+    asset_config = get_asset_config(chain, asset_type)
+    token_decimals = asset_config.get("token_decimals", 18)
+    result = validate_csv_file(csv_path, chain, asset_type, token_decimals=token_decimals)
     if not result.is_valid:
         click.echo(click.style(format_validation_errors(result.errors), fg="red"))
         raise SystemExit(1)
-
-    chain_config = get_chain_config(chain)
-    asset_config = get_asset_config(chain, asset_type)
     multisig = chain_config["multisig"]
     alchemist = asset_config.get("alchemist") or "0x" + "0" * 40
     al_token = asset_config.get("al_token") or "0x" + "0" * 40

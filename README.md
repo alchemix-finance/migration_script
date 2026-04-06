@@ -302,13 +302,11 @@ The ABI declares `deposit` as returning `[uint256]` (one value). The actual cont
 
 Fix: update the ABI outputs to `[{"name": "tokenId", "type": "uint256"}, {"name": "debtValue", "type": "uint256"}]`.
 
-### Bug #4 — USDC token decimals hardcoded to 18
+### ~~Bug #4~~ — USDC token decimals (Fixed)
 
-**File:** `validation.py:position_from_row`, `validate_csv_file`
+USD asset configs in `src/config.py` now set `token_decimals: 6`. All three entry-point scripts (`migrate.py`, `batch.py`, `validate.py`) read `token_decimals` from the asset config and pass it to `validate_csv_file()`, which threads it through to `convert_to_wei()`. ETH configs remain at 18.
 
-`convert_to_wei` uses `token_decimals=18` by default. If `underlyingValue` in the CSV represents USDC amounts (6 decimals) rather than MYT shares (18 decimals), USD position deposits will be 10¹² times larger than intended, causing immediate revert from the deposit cap check.
-
-Verify that all CSV `underlyingValue` figures are in MYT share units (18-decimal), or add a per-asset `token_decimals` parameter to the config and pass `6` for USD-backed assets.
+CSV `underlyingValue` for USD positions must be in **USDC-decimaled MYT share units** (i.e. values like `5000.123456` where 6 digits after the decimal are significant). Values are multiplied by `10^6` before being sent to the contract.
 
 ### Bug #5 — `burn()` only clears unearmarked debt
 
@@ -351,7 +349,7 @@ The tests import `load_cdp_abi`, `build_position_transactions`, `build_transfer_
 - [ ] Multisig funded with enough MYT shares to cover total deposit amounts (or pre-approved)
 - [ ] Bug #1 fixed: NFT address resolved from `alchemist.alchemistPositionNFT()`
 - [ ] Bug #2 fixed: alAsset balance math accounts for credit distributions
-- [ ] Bug #4 confirmed: CSV values are in MYT share units (18-decimal) not raw USDC
+- [x] Bug #4 fixed: `token_decimals=6` for USD configs; scripts wire it through to `convert_to_wei()`
 - [ ] Bug #6 fixed: Safe nonce fetched from Safe Transaction Service API
 - [ ] Dry run passes on all chains and assets: `ape run migrate --dry-run`
 - [ ] Team has a plan for patching token IDs from Phase 1 events before Phase 3/4
