@@ -102,8 +102,8 @@ def cli(
     # =========================================================================
     click.echo(click.style("\n[1/5] Validating CSV...", fg="cyan", bold=True))
 
-    token_decimals = asset_config.get("token_decimals", 18)
-    result = validate_csv_file(csv_path, chain, asset_type, token_decimals=token_decimals)
+    myt_decimals = asset_config.get("myt_decimals", 18)
+    result = validate_csv_file(csv_path, chain, asset_type, myt_decimals=myt_decimals)
 
     if not result.is_valid:
         click.echo(click.style(format_validation_errors(result.errors), fg="red"))

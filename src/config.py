@@ -18,8 +18,10 @@ class AssetConfig(TypedDict):
     al_token: str       # alUSD or alETH token
     underlying: str     # USDC or WETH
     nft: str            # AlchemistV3Position contract — separate from AlchemistV3. Read from alchemist.alchemistPositionNFT()
-    # MYT share tokens use 18 decimals. CSV underlyingValue must be in MYT share units, not raw underlying units.
-    token_decimals: int  # Decimals for MYT share amounts in CSV (typically 18)
+    myt_decimals: int   # Decimal precision of the MYT vault token (6 for USDCMYT, 18 for WETHMYT).
+                        # CSV underlyingValue is exported as 18-decimal wei; deposit amount is
+                        # computed as csv_value // 10^(18 - myt_decimals). Debt values are always
+                        # 18-decimal alToken units and are NOT scaled by this field.
 
 
 class ChainConfig(TypedDict):
@@ -59,7 +61,7 @@ CHAINS: dict[str, ChainConfig] = {
             "al_token": "",
             "underlying": "",
             "nft": "",          # AlchemistV3Position address — fill in after deployment
-            "token_decimals": 0,  # CSV values are already in atomic/wei units — do not multiply
+            "myt_decimals": 6,  # USDCMYT vault uses 6 decimals (same as USDC underlying)
         },
         "eth": {
             "alchemist": "",
@@ -67,7 +69,7 @@ CHAINS: dict[str, ChainConfig] = {
             "al_token": "",
             "underlying": "",
             "nft": "",          # AlchemistV3Position address — fill in after deployment
-            "token_decimals": 0,  # CSV values are already in atomic/wei units — do not multiply
+            "myt_decimals": 18, # WETHMYT vault uses 18 decimals (same as WETH underlying)
         },
     },
     "optimism": {
@@ -79,7 +81,7 @@ CHAINS: dict[str, ChainConfig] = {
             "al_token": "",
             "underlying": "",
             "nft": "",          # AlchemistV3Position address — fill in after deployment
-            "token_decimals": 0,  # CSV values are already in atomic/wei units — do not multiply
+            "myt_decimals": 6,  # USDCMYT vault uses 6 decimals (same as USDC underlying)
         },
         "eth": {
             "alchemist": "",
@@ -87,7 +89,7 @@ CHAINS: dict[str, ChainConfig] = {
             "al_token": "",
             "underlying": "",
             "nft": "",          # AlchemistV3Position address — fill in after deployment
-            "token_decimals": 0,  # CSV values are already in atomic/wei units — do not multiply
+            "myt_decimals": 18, # WETHMYT vault uses 18 decimals (same as WETH underlying)
         },
     },
     "arbitrum": {
@@ -99,7 +101,7 @@ CHAINS: dict[str, ChainConfig] = {
             "al_token": "",
             "underlying": "",
             "nft": "",          # AlchemistV3Position address — fill in after deployment
-            "token_decimals": 0,  # CSV values are already in atomic/wei units — do not multiply
+            "myt_decimals": 6,  # USDCMYT vault uses 6 decimals (same as USDC underlying)
         },
         "eth": {
             "alchemist": "",
@@ -107,7 +109,7 @@ CHAINS: dict[str, ChainConfig] = {
             "al_token": "",
             "underlying": "",
             "nft": "",          # AlchemistV3Position address — fill in after deployment
-            "token_decimals": 0,  # CSV values are already in atomic/wei units — do not multiply
+            "myt_decimals": 18, # WETHMYT vault uses 18 decimals (same as WETH underlying)
         },
     },
 }

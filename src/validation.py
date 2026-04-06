@@ -142,27 +142,40 @@ def position_from_row(
     row: CSVRow,
     chain: str,
     asset_type: AssetType,
-    token_decimals: int = 18,
+    myt_decimals: int = 18,
 ) -> PositionMigration:
     """Build a PositionMigration from a validated CSV row.
 
-    MYT is 1:1 with underlying at migration time (no strategies allocated yet),
-    so deposit_amount_wei = underlying_value_wei.
+    CSV underlyingValue is exported as an 18-decimal wei value regardless of the
+    underlying token's actual decimal precision. Divide by 10^(18 - myt_decimals)
+    to get the correct MYT share amount for deposit():
+      - USDCMYT (6 dec): divide by 10^12
+      - WETHMYT (18 dec): divide by 1 (no change)
 
-    Debt:
+    Debt values are always 18-decimal alToken units (alUSD/alETH are both 18-decimal
+    ERC-20s) and are passed through unchanged regardless of myt_decimals.
+
+    Debt sign convention:
       positive → real debt user: mint that amount as alAssets to multisig; no credit.
       negative → credit user: mint abs(debt) to multisig as a temporary debt (Phase 1),
                  distribute abs(debt) alAssets to the user (Phase 2), then burn the
                  temp debt back in Phase 3. Both mint_amount_wei AND credit_amount_wei
-                 are set to abs(debt) — this is intentional and required for math to
-                 balance. See PositionMigration docstring for full phase description.
+                 are set to abs(debt) — intentional, required for alToken math to balance.
       zero     → deposit only, no mint, no credit.
     """
-    deposit_wei = convert_to_wei(row.underlying_value, token_decimals)
-    mint_wei = convert_to_wei(row.debt, token_decimals) if row.debt > 0 else (
-        convert_to_wei(abs(row.debt), token_decimals) if row.debt < 0 else 0
-    )
-    credit_wei = convert_to_wei(abs(row.debt), token_decimals) if row.debt < 0 else 0
+    scale = 10 ** (18 - myt_decimals)
+    deposit_wei = int(row.underlying_value) // scale
+
+    # Debt is always 18-decimal alToken — pass through as-is, no myt_decimals scaling.
+    if row.debt > 0:
+        mint_wei = int(row.debt)
+        credit_wei = 0
+    elif row.debt < 0:
+        mint_wei = int(abs(row.debt))
+        credit_wei = int(abs(row.debt))
+    else:
+        mint_wei = 0
+        credit_wei = 0
 
     return PositionMigration(
         user_address=row.address,
@@ -178,13 +191,12 @@ def validate_csv_file(
     file_path: Path,
     chain: str,
     asset_type: AssetType,
-    token_decimals: int = 18,
+    myt_decimals: int = 18,
 ) -> ValidationResult:
     """Load and validate a migration CSV file.
 
-    token_decimals: scaling factor for CSV values. CSV values are already in
-        atomic/wei units, so this should be 0 (no scaling). Read from
-        AssetConfig.token_decimals; do not hardcode.
+    myt_decimals: decimal precision of the MYT vault token (6 for USDCMYT, 18 for WETHMYT).
+        Read from AssetConfig.myt_decimals; do not hardcode.
 
     Stops immediately on the first invalid row.
     """
@@ -197,24 +209,24 @@ def validate_csv_file(
         return result
 
     with open(file_path, "r", newline="", encoding="utf-8") as f:
-        return _validate_csv_content(f, chain, asset_type, token_decimals)
+        return _validate_csv_content(f, chain, asset_type, myt_decimals)
 
 
 def validate_csv_string(
     csv_content: str,
     chain: str,
     asset_type: AssetType,
-    token_decimals: int = 18,
+    myt_decimals: int = 18,
 ) -> ValidationResult:
     """Validate CSV content from a string (for testing)."""
-    return _validate_csv_content(StringIO(csv_content), chain, asset_type, token_decimals)
+    return _validate_csv_content(StringIO(csv_content), chain, asset_type, myt_decimals)
 
 
 def _validate_csv_content(
     file_obj: TextIO,
     chain: str,
     asset_type: AssetType,
-    token_decimals: int,
+    myt_decimals: int,
 ) -> ValidationResult:
     result = ValidationResult()
 
@@ -251,7 +263,7 @@ def _validate_csv_content(
             seen_addresses.add(csv_row.address.lower())
             result.rows.append(csv_row)
 
-            position = position_from_row(csv_row, chain, asset_type, token_decimals)
+            position = position_from_row(csv_row, chain, asset_type, myt_decimals)
             result.positions.append(position)
 
             result.total_deposit_wei += position.deposit_amount_wei

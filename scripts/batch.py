@@ -42,8 +42,8 @@ def cli(cli_ctx, chain: str, asset: str, verbose: bool) -> None:
 
     chain_config = get_chain_config(chain)
     asset_config = get_asset_config(chain, asset_type)
-    token_decimals = asset_config.get("token_decimals", 18)
-    result = validate_csv_file(csv_path, chain, asset_type, token_decimals=token_decimals)
+    myt_decimals = asset_config.get("myt_decimals", 18)
+    result = validate_csv_file(csv_path, chain, asset_type, myt_decimals=myt_decimals)
     if not result.is_valid:
         click.echo(click.style(format_validation_errors(result.errors), fg="red"))
         raise SystemExit(1)
