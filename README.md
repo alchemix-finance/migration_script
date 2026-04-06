@@ -240,13 +240,20 @@ Chains: `mainnet`, `optimism`, `arbitrum`
 
 Batches are constrained by three limits (whichever is hit first):
 
-| Chain | Block Gas | TX Gas Limit | Max TX Size | Effective Gas (90%) | Max Calls/Batch |
-|-------|-----------|-------------|-------------|--------------------:|----------------:|
-| Ethereum Mainnet | 60M | 15M | 128 KB | 13,500,000 | 50 |
-| Optimism | 30M | 15M | 120 KB | 13,500,000 | 50 |
-| Arbitrum One | 32M | 15M | 118 KB | 13,500,000 | 50 |
+| Chain | Block Gas | TX Gas Limit | Max TX Size | Effective Gas (90%) |
+|-------|-----------|-------------|-------------|--------------------:|
+| Ethereum Mainnet | 60M | 15M | 128 KB | 13,500,000 |
+| Optimism | 30M | 15M | 120 KB | 13,500,000 |
+| Arbitrum One | 32M | 15M | 118 KB | 13,500,000 |
 
-At 50 calls per batch with typical gas costs (~175K per deposit, ~130K per mint, ~70K per transfer), gas utilization is ~65% per deposit batch and ~48% per mint batch. The 50-call limit keeps batches reviewable in the Safe UI while staying well under the per-transaction gas limit.
+Batches fill to ~90% of the per-transaction gas limit. Typical batch sizes:
+
+| Operation | Gas/call | Calls/batch | Gas utilization |
+|-----------|---------|------------|-----------------|
+| `deposit` | 175K | ~76 | ~90% |
+| `mint` | 130K | ~103 | ~90% |
+| `transferFrom` | 70K | ~192 | ~90% |
+| `alToken.transfer` | 65K | ~207 | ~90% |
 
 ---
 
