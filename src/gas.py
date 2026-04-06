@@ -15,7 +15,7 @@ Gas limit: 16M. Target: 90% = 14.4M per batch (10% headroom).
 
 from src.config import (
     EFFECTIVE_GAS_LIMIT,
-    GAS_BURN,
+    GAS_ALTOKEN_BURN,
     GAS_DEPOSIT,
     GAS_MINT,
     GAS_SET_DEPOSIT_CAP,
@@ -141,54 +141,35 @@ def create_deposit_batches(
     return batches
 
 
-def create_burn_batches(
-    debt_positions: list[PositionMigration],
-    alchemist_address: str,
-    gas_limit: int = EFFECTIVE_GAS_LIMIT,
-) -> list[TransactionBatch]:
-    """Create burn batches: one burn(amount, tokenId) per position with mint_amount_wei > 0.
 
-    Covers two cases:
-      - Debt users:   burn their real debt (mint_amount_wei == their original debt).
-      - Credit users: burn the temporary debt that was minted in Phase 1 to fund credit
-                      distribution. Their mint_amount_wei == credit_amount_wei, so after
-                      Phase 2 distributes those alAssets to them, this burn clears the
-                      position back to zero debt. Math: minted == burned, net = 0. ✓
+def create_final_burn_batch(
+    amount_wei: int,
+    al_token_address: str,
+    use_transfer_fallback: bool = False,
+) -> "TransactionBatch | None":
+    """Create the single final-burn batch for Script 2.
 
-    Token IDs are placeholders (999999) — must be patched before submission
-    based on actual token IDs from deposit events.
+    Burns remaining alAssets in the multisig after credit distribution and NFT transfers.
+    amount_wei = total_mint_wei - total_credit_wei (debt users' minted amounts only).
 
-    These batches are executed AFTER credit_batches so the multisig has already
-    distributed the credit alAssets before burning.
+    Primary:  alToken.burn(amount)          — ERC20Burnable, reduces supply cleanly.
+    Fallback: alToken.transfer(0x000, amt)  — if burn() is not available on the contract.
+
+    Returns None if amount_wei is 0 (nothing to burn).
     """
-    from src.transactions import build_burn_tx
+    from src.transactions import build_altoken_burn_tx, build_altoken_transfer_zero_tx
 
-    if not debt_positions:
-        return []
+    if amount_wei <= 0:
+        return None
 
-    batches: list[TransactionBatch] = []
-    current_batch = TransactionBatch(batch_number=1, batch_type="burn")
+    if use_transfer_fallback:
+        tx = build_altoken_transfer_zero_tx(al_token_address, amount_wei)
+    else:
+        tx = build_altoken_burn_tx(al_token_address, amount_wei)
 
-    PLACEHOLDER_TOKEN_ID = 999_999
-
-    for position in debt_positions:
-        burn_tx = build_burn_tx(
-            token_id=PLACEHOLDER_TOKEN_ID,
-            burn_amount_wei=position.mint_amount_wei,
-            alchemist_address=alchemist_address,
-            user_address=position.user_address,
-        )
-
-        if current_batch.total_gas + burn_tx.gas_estimate > gas_limit and current_batch.calls:
-            batches.append(current_batch)
-            current_batch = TransactionBatch(batch_number=len(batches) + 1, batch_type="burn")
-
-        current_batch.add_call(burn_tx)
-
-    if current_batch.calls:
-        batches.append(current_batch)
-
-    return batches
+    batch = TransactionBatch(batch_number=1, batch_type="final_burn")
+    batch.add_call(tx)
+    return batch
 
 
 def create_credit_batches(
@@ -279,32 +260,23 @@ def build_migration_plan(
     multisig: str,
     current_deposit_cap_wei: int = 0,
     gas_limit: int = EFFECTIVE_GAS_LIMIT,
+    use_burn_fallback: bool = False,
 ) -> "MigrationPlan":
-    """Build the complete migration plan for one asset type on one chain.
+    """Build the two-script migration plan for one asset type on one chain.
 
-    Returns a MigrationPlan with all four batch phases:
-      1. deposit_batches  — [setDepositCap, deposit, mint?] per user
-                            Credit users are included here: they get a mint equal to
-                            their credit_amount_wei, creating a temporary debt that is
-                            cleared in Phase 3.
-      2. credit_batches   — alToken.transfer to credit users (distributes their alAssets)
-      3. burn_batches     — burn alAssets for ALL positions with mint_amount_wei > 0
-                            (debt users burn their real debt; credit users burn the temp
-                            debt minted in Phase 1 — math balances because the alAssets
-                            were already sent to the users in Phase 2)
-      4. transfer_batches — NFT transferFrom to each user
+    Script 1 — deposit_batches:
+      [setDepositCap, deposit, mint?] per user.
+      All users with mint_amount_wei > 0 (debt AND credit) get minted in Script 1.
+      alAssets land in the multisig. Team verifies before running Script 2.
 
-    Phase ordering:
-      deposit → credit → burn → transfer
-      (credit before burn so the multisig distributes alAssets before burning the
-       temporary credit-user debt; burn total == mint total, so the books close cleanly)
+    Script 2 — after verification:
+      credit_batches   — alToken.transfer(user, credit_amount_wei) for credit users
+      transfer_batches — ERC721.transferFrom(multisig, user, tokenId) for all users
+      final_burn_batch — alToken.burn(remaining) OR transfer(0x000, remaining)
+                         remaining = total_mint_wei - total_credit_wei
+                         (= debt users' minted amounts; credit users keep theirs)
 
-    Why credit users appear in BOTH credit_batches AND burn_batches:
-      Phase 1 mints credit_amount_wei to multisig (temp debt on their position).
-      Phase 2 sends those alAssets out to the user.
-      Phase 3 burns mint_amount_wei (== credit_amount_wei) back from multisig,
-      clearing the temp debt. Net effect on multisig alAsset balance: zero.
-      Net effect on user position: zero debt, correct collateral. ✓
+    use_burn_fallback: if True, final_burn_batch uses transfer(0x000...) instead of burn().
     """
     from src.types import AssetType, MigrationPlan
 
@@ -321,14 +293,13 @@ def build_migration_plan(
         plan.credit_users, al_token_address, gas_limit,
     )
 
-    # Include all positions that have mint_amount_wei > 0: both true debt users and credit
-    # users whose temporary Phase 1 mint must be burned to clear their position.
-    plan.burn_batches = create_burn_batches(
-        [p for p in plan.positions if p.mint_amount_wei > 0], alchemist_address, gas_limit,
-    )
-
     plan.transfer_batches = create_transfer_batches(
         positions, nft_address, multisig, gas_limit,
+    )
+
+    remaining_wei = plan.total_mint_wei - plan.total_credit_wei
+    plan.final_burn_batch = create_final_burn_batch(
+        remaining_wei, al_token_address, use_burn_fallback,
     )
 
     return plan

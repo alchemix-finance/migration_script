@@ -45,6 +45,7 @@ GAS_MINT = 130_000                 # mint(tokenId, amount, multisig) — mints a
 GAS_BURN = 120_000                 # burn(amount, tokenId) on Alchemist — burns alAssets, clears debt
 GAS_TRANSFER_ALTOKEN = 65_000      # alToken.transfer(user, amount) — send credit to user
 GAS_TRANSFER_NFT = 70_000          # ERC721.transferFrom(multisig, user, tokenId)
+GAS_ALTOKEN_BURN = 35_000          # alToken.burn(amount) — ERC20Burnable direct burn
 
 # Large position surcharge (> 1000 tokens in wei)
 LARGE_POSITION_THRESHOLD = 10 ** 21

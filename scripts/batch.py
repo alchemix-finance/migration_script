@@ -56,16 +56,17 @@ def cli(cli_ctx, chain: str, asset: str, verbose: bool) -> None:
         chain=chain,
         alchemist_address=alchemist,
         al_token_address=al_token,
-        # NFT address comes from asset config — AlchemistV3Position is separate from AlchemistV3.
-        # Populate "nft" in config after deployment (read from alchemist.alchemistPositionNFT()).
         nft_address=asset_config.get("nft", "") or alchemist,
         multisig=multisig,
     )
 
-    all_batches = (
-        plan.deposit_batches + plan.credit_batches
-        + plan.burn_batches + plan.transfer_batches
+    s1_batches = plan.deposit_batches
+    s2_batches = (
+        plan.credit_batches
+        + plan.transfer_batches
+        + ([plan.final_burn_batch] if plan.final_burn_batch else [])
     )
+    all_batches = s1_batches + s2_batches
 
     ok, errors = verify_batch_gas_limits(all_batches)
     if not ok:
@@ -75,8 +76,12 @@ def cli(cli_ctx, chain: str, asset: str, verbose: bool) -> None:
 
     click.echo(f"\nChain: {chain} | Asset: {asset_type.value}")
     click.echo(f"Gas target: {EFFECTIVE_GAS_LIMIT:,} per batch (90% of 16M)")
-    click.echo("")
-    click.echo(format_batch_summary(all_batches))
+
+    click.echo(click.style("\nScript 1 — Deposit + Mint:", fg="cyan"))
+    click.echo(format_batch_summary(s1_batches))
+
+    click.echo(click.style("\nScript 2 — Distribute + Burn:", fg="cyan"))
+    click.echo(format_batch_summary(s2_batches))
 
     if verbose:
         for batch in all_batches:

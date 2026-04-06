@@ -65,33 +65,51 @@ def print_migration_plan(
     click.echo(click.style("Position Summary", fg="white", bold=True))
     click.echo(SUB)
     click.echo(f"  Total positions:  {len(plan.positions)}")
-    click.echo(f"  Debt users:       {len(plan.debt_users)}   (deposit + mint → burn later)")
-    click.echo(f"  Credit users:     {len(plan.credit_users)}   (deposit only → receive alAssets)")
+    click.echo(f"  Debt users:       {len(plan.debt_users)}   (deposit + mint; multisig burns remainder in Script 2)")
+    click.echo(f"  Credit users:     {len(plan.credit_users)}   (deposit + mint; receive alAssets in Script 2)")
     click.echo(f"  Zero-debt users:  {len(plan.zero_debt_users)}   (deposit only)")
     click.echo(f"  Total deposit:    {_fmt_wei(plan.total_deposit_wei)}")
     click.echo(f"  Total minted:     {_fmt_wei(plan.total_mint_wei)}")
     click.echo(f"  Total credit out: {_fmt_wei(plan.total_credit_wei)}")
     click.echo(f"  Net to burn:      {_fmt_wei(plan.total_burn_wei)}")
 
-    all_batches = (
-        plan.deposit_batches
-        + plan.credit_batches
-        + plan.burn_batches
+    s1_batches = plan.deposit_batches
+    s2_batches = (
+        plan.credit_batches
         + plan.transfer_batches
+        + ([plan.final_burn_batch] if plan.final_burn_batch else [])
     )
+    all_batches = s1_batches + s2_batches
 
     click.echo(f"\n{SUB}")
-    click.echo(click.style("Batch Overview", fg="white", bold=True))
+    click.echo(click.style("Script 1 — Deposit + Mint", fg="white", bold=True))
+    click.echo(SUB)
+    if plan.deposit_batches:
+        stats = calculate_batch_statistics(plan.deposit_batches)
+        click.echo(
+            f"  {stats['total_batches']} batch(es), "
+            f"{stats['total_transactions']} txns, "
+            f"{_fmt_gas(stats['total_gas'])} total gas"
+        )
+        for batch in plan.deposit_batches:
+            click.echo(_batch_row(batch))
+            if verbose:
+                for call in batch.calls[:5]:
+                    click.echo(f"      • {call.description[:80]}")
+                if len(batch.calls) > 5:
+                    click.echo(f"      ... +{len(batch.calls) - 5} more")
+    else:
+        click.echo("  (none)")
+
+    click.echo(f"\n{SUB}")
+    click.echo(click.style("Script 2 — Distribute + Burn  (after team verification)", fg="white", bold=True))
     click.echo(SUB)
 
-    phases = [
-        ("Phase 1 — Deposit + Mint", plan.deposit_batches),
-        ("Phase 2 — Credit Distribution", plan.credit_batches),
-        ("Phase 3 — Burn Debt", plan.burn_batches),
-        ("Phase 4 — NFT Transfer", plan.transfer_batches),
+    s2_phases = [
+        ("Credit Distribution", plan.credit_batches),
+        ("NFT Transfer", plan.transfer_batches),
     ]
-
-    for phase_name, batches in phases:
+    for phase_name, batches in s2_phases:
         if not batches:
             click.echo(f"\n  {phase_name}: (none)")
             continue
@@ -110,23 +128,35 @@ def print_migration_plan(
                 if len(batch.calls) > 5:
                     click.echo(f"      ... +{len(batch.calls) - 5} more")
 
+    if plan.final_burn_batch:
+        b = plan.final_burn_batch
+        click.echo(f"\n  {click.style('Final Burn', fg='white', bold=True)} — 1 batch, 1 txn")
+        click.echo(_batch_row(b))
+        if verbose and b.calls:
+            click.echo(f"      • {b.calls[0].description[:80]}")
+    else:
+        click.echo("\n  Final Burn: (nothing to burn — no debt users)")
+
     total_stats = calculate_batch_statistics(all_batches)
     click.echo(f"\n{SUB}")
     click.echo(click.style("Totals", fg="white", bold=True))
     click.echo(SUB)
-    click.echo(f"  Safe transactions:  {total_stats['total_batches']}")
+    click.echo(f"  Script 1 Safe txns: {len(s1_batches)}")
+    click.echo(f"  Script 2 Safe txns: {len(s2_batches)}")
+    click.echo(f"  Total Safe txns:    {total_stats['total_batches']}")
     click.echo(f"  Total calls:        {total_stats['total_transactions']}")
     click.echo(f"  Total gas:          {_fmt_gas(total_stats['total_gas'])}")
     click.echo(f"  Gas limit/batch:    {_fmt_gas(EFFECTIVE_GAS_LIMIT)} (90% of 16M)")
+    click.echo(f"  Remaining to burn:  {_fmt_wei(plan.total_burn_wei)}")
 
     click.echo(f"\n{SUB}")
     click.echo(
-        click.style("⚠  Token IDs in burn/transfer/credit batches are PLACEHOLDERS (999999).", fg="yellow")
+        click.style("NOTE: Token IDs in transfer/credit batches are PLACEHOLDERS (999999).", fg="yellow")
     )
     click.echo(
-        "   After Phase 1 executes, read AlchemistV3PositionNFTMinted events"
+        "      After Script 1 executes, read AlchemistV3PositionNFTMinted events"
     )
     click.echo(
-        "   and patch token IDs into Phase 3/4 batches before signing them."
+        "      and patch token IDs into Script 2 transfer batches before signing."
     )
     click.echo(LINE)

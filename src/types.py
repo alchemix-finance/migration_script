@@ -69,25 +69,21 @@ class CSVRow:
 class PositionMigration:
     """One user's position to be migrated — per asset type.
 
-    Flow:
-      Phase 1 — deposit_batches (per user):
-        1a. deposit(deposit_amount_wei, multisig, 0)  → receives token_id from contract
-        1b. if mint_amount_wei > 0: mint(token_id, mint_amount_wei, multisig)
-            — alAssets land in multisig, user's debt is recorded on position
-            — applies to BOTH debt users (mint = their debt) AND credit users
-              (mint = their credit_amount, creating a temporary debt that is
-               burned in Phase 3)
+    Script 1 — deposit_batches (per user):
+      1a. deposit(deposit_amount_wei, multisig, 0)  → receives token_id from contract
+      1b. if mint_amount_wei > 0: mint(token_id, mint_amount_wei, multisig)
+          — alAssets land in multisig, user's debt is recorded on position
+          — applies to BOTH debt users (mint = their debt) AND credit users
+            (mint = their credit_amount, so multisig holds the tokens to distribute)
 
-    After all positions are created and verified:
-      Phase 2 — credit_batches:
-        2. alToken.transfer(user, credit_amount_wei) for each credit user
-           (multisig distributes their alAssets)
-      Phase 3 — burn_batches:
-        3. burn(mint_amount_wei, token_id) for every position where mint_amount_wei > 0
-           — debt users: clears their real debt
-           — credit users: clears the temporary debt created in Phase 1
-      Phase 4 — transfer_batches:
-        4. transferFrom(multisig, user, token_id) for all users
+    Team verifies positions match snapshot before running Script 2.
+
+    Script 2 — after verification:
+      2a. credit_batches: alToken.transfer(user, credit_amount_wei) for credit users
+      2b. transfer_batches: ERC721.transferFrom(multisig, user, tokenId) for all users
+      2c. final_burn_batch: alToken.burn(total_remaining) — burns leftover alAssets
+          (leftover = total_mint_wei - total_credit_wei = debt users' minted amounts)
+          Fallback: alToken.transfer(address(0), total_remaining)
     """
 
     user_address: Address
@@ -166,11 +162,13 @@ class TransactionBatch:
 class MigrationPlan:
     """Complete migration plan for one asset type on one chain.
 
-    Phases:
+    Script 1:
       deposit_batches  — raise cap + deposit + mint per user
-      burn_batches     — burn excess alAssets per debt-user position
+
+    Script 2 (after team verification):
       credit_batches   — transfer alAssets to credit users
-      transfer_batches — transfer NFTs to users
+      transfer_batches — transfer NFTs to all users
+      final_burn_batch — burn remaining alAssets directly on alToken contract
     """
 
     chain: str
@@ -178,9 +176,9 @@ class MigrationPlan:
     positions: list[PositionMigration] = field(default_factory=list)
 
     deposit_batches: list[TransactionBatch] = field(default_factory=list)
-    burn_batches: list[TransactionBatch] = field(default_factory=list)
     credit_batches: list[TransactionBatch] = field(default_factory=list)
     transfer_batches: list[TransactionBatch] = field(default_factory=list)
+    final_burn_batch: "TransactionBatch | None" = None
 
     @property
     def total_deposit_wei(self) -> int:
@@ -196,15 +194,13 @@ class MigrationPlan:
 
     @property
     def total_burn_wei(self) -> int:
-        """alAssets to burn = all minted amounts (debt users + credit users who had temp mints).
+        """alAssets burned directly from multisig via alToken.burn() at end of Script 2.
 
-        With the corrected credit-user flow, credit users have mint_amount_wei == credit_amount_wei,
-        so total_mint_wei already equals total_burn_wei. No subtraction needed: the multisig
-        holds exactly total_mint_wei after Phase 1, sends total_credit_wei out in Phase 2, and
-        the remaining (total_mint_wei - total_credit_wei) plus the credit users' own burns
-        together equal total_mint_wei. Math check: sum of all p.mint_amount_wei across positions.
+        = total minted minus what was sent to credit users.
+        = sum of debt users' mint amounts only.
+        Credit users hold their own alAssets and can burn them to clear their position.
         """
-        return sum(p.mint_amount_wei for p in self.positions)
+        return self.total_mint_wei - self.total_credit_wei
 
     @property
     def debt_users(self) -> list[PositionMigration]:

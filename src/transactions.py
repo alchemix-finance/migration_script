@@ -26,6 +26,7 @@ from eth_utils import keccak
 
 from src.abi import load_alchemist_abi, load_altoken_abi, load_erc721_abi
 from src.config import (
+    GAS_ALTOKEN_BURN,
     GAS_BURN,
     GAS_DEPOSIT,
     GAS_LARGE_POSITION_SURCHARGE,
@@ -228,6 +229,49 @@ def build_altoken_transfer_tx(
         value=0,
         gas_estimate=GAS_TRANSFER_ALTOKEN,
         description=f"alToken.transfer({recipient}, {amount_wei}) — credit for {user_address}",
+    )
+
+
+ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+
+
+def build_altoken_burn_tx(
+    al_token_address: str,
+    amount_wei: int,
+) -> TransactionCall:
+    """Build alToken.burn(amount) — primary path for disposing of leftover alAssets.
+
+    Burns tokens directly on the alToken contract (ERC20Burnable).
+    Does NOT interact with AlchemistV3 — position debts remain on the NFT owners.
+    """
+    abi = load_altoken_abi()
+    data = encode_function_call(abi, "burn", [amount_wei])
+    return TransactionCall(
+        to=al_token_address,
+        data=data,
+        value=0,
+        gas_estimate=GAS_ALTOKEN_BURN,
+        description=f"alToken.burn({amount_wei}) — destroy remaining multisig alAssets",
+    )
+
+
+def build_altoken_transfer_zero_tx(
+    al_token_address: str,
+    amount_wei: int,
+) -> TransactionCall:
+    """Build alToken.transfer(address(0), amount) — fallback if burn() is unavailable.
+
+    Sends remaining alAssets to the zero address as a burn substitute.
+    Use only if alToken.burn() reverts (e.g. contract does not implement ERC20Burnable).
+    """
+    abi = load_altoken_abi()
+    data = encode_function_call(abi, "transfer", [ZERO_ADDRESS, amount_wei])
+    return TransactionCall(
+        to=al_token_address,
+        data=data,
+        value=0,
+        gas_estimate=GAS_TRANSFER_ALTOKEN,
+        description=f"alToken.transfer(0x000...000, {amount_wei}) — fallback burn",
     )
 
 
