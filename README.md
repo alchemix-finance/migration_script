@@ -85,21 +85,21 @@ CHAINS = {
             "myt":        "",   # USDC MYT vault token address
             "al_token":   "",   # alUSD token address
             "underlying": "",   # USDC address
+            "nft":        "",   # AlchemistV3Position — read from alchemist.alchemistPositionNFT()
         },
         "eth": {
             "alchemist": "",    # AlchemistV3 for alETH — fill in after deployment
             "myt":        "",   # WETH MYT vault token address
             "al_token":   "",   # alETH token address
             "underlying": "",   # WETH address
+            "nft":        "",   # AlchemistV3Position — read from alchemist.alchemistPositionNFT()
         },
     },
     ...
 }
 ```
 
-> **Note:** The NFT contract address (`AlchemistV3Position`) is read from
-> `alchemist.alchemistPositionNFT()` on-chain. It is **not** the same address as the
-> `AlchemistV3` contract. See [Bug #1](#known-bugs-to-fix-before-production) below.
+> **Note:** The NFT contract address (`AlchemistV3Position`) is a **separate contract** from `AlchemistV3`. Read it from `alchemist.alchemistPositionNFT()` after deployment and set it in the config before running.
 
 ---
 
@@ -116,27 +116,25 @@ Schema:
 
 ```csv
 address,underlyingValue,debt
-0xAAA...,5000.00,1000.50
-0xBBB...,15000.00,3000.00
-0xCCC...,2000.00,-250.00
-0xDDD...,8000.00,0
+0xAAA...,1000000000000000000,1000500000000000000
+0xBBB...,15000000000000000000,3000000000000000000
+0xCCC...,2000000000000000000,-250000000000000000
+0xDDD...,8000000000000000000,0
 ```
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `address` | `0x...` (42 chars) | User's Ethereum address |
-| `underlyingValue` | decimal ≥ 0 | Collateral in MYT shares at migration time |
-| `debt` | decimal | Positive = user owes alAssets. Negative = protocol owes user alAssets (credit balance). Zero = collateral-only position. |
+| `underlyingValue` | integer (wei) | Collateral in MYT shares at migration time |
+| `debt` | integer (wei) | Positive = user owes alAssets. Negative = protocol owes user alAssets (credit balance). Zero = collateral-only position. |
 
 Rules:
 - One row per user per asset. A user with both alUSD and alETH positions appears in two separate files.
 - Duplicate addresses within a file are rejected.
 - Rows with `underlyingValue = 0` are rejected (users with no collateral are not migrated).
-- A row cannot have both positive debt and negative debt simultaneously.
+- Values must be plain integers in wei — no scientific notation, no decimals.
 
-> **Decimal precision:** Values are converted to wei using 18 decimal places by default.
-> For USDC-backed positions (6 decimals), ensure CSV values are already in MYT share
-> units (18-decimal) rather than raw USDC units. See [Bug #4](#known-bugs-to-fix-before-production).
+> **Decimal precision:** USD positions use `token_decimals=6` (USDC). ETH positions use `token_decimals=18`. The `underlyingValue` column must be in MYT share units denominated at the correct decimal precision for the asset.
 
 ---
 
@@ -240,6 +238,8 @@ Key behaviors:
 - `burn(amount, tokenId)` — burns alAssets held by `msg.sender` (multisig) against a specific position's unearmarked debt. Cannot be called in the same block as `mint`.
 - `setDepositCap` — requires multisig to be set as admin on each AlchemistV3 before the migration starts.
 
+> **Timing:** If significant time passes between Phase 1 and Phase 3, the Transmuter may earmark some debt. `burn()` only clears unearmarked debt — if all of a position's debt is earmarked, the call will revert. Execute all phases promptly after Phase 1.
+
 ---
 
 ## Gas Budget
@@ -259,100 +259,15 @@ Batches target 90% of 16M gas = **14,400,000 gas** per Safe transaction.
 
 ---
 
-## Known Bugs to Fix Before Production
-
-The following issues were identified during code review against the v3 contracts. **None of these will cause data loss** (all failures are reverts), but they will cause the migration to halt partway through.
-
-### Bug #1 — NFT address is wrong (Phase 4 will fail entirely)
-
-**File:** `migrate.py:142`, `batch.py:59`
-
-```python
-# Current (WRONG):
-nft = alchemist  # "same as alchemist for now"
-
-# Fix:
-from web3 import Web3
-w3 = Web3(...)
-alchemist_contract = w3.eth.contract(address=alchemist, abi=ALCHEMIST_ABI)
-nft = alchemist_contract.functions.alchemistPositionNFT().call()
-```
-
-`AlchemistV3Position` is a **separate ERC721 contract** from `AlchemistV3`. Sending `transferFrom` to the alchemist address will revert because `AlchemistV3` has no `transferFrom` method. Phase 4 will fail 100% of the time without this fix.
-
-### Bug #2 — alAsset balance math is wrong (Phase 3 will run short)
-
-**File:** `gas.py:create_burn_batches`
-
-Phase 1 mints `total_mint_wei` alAssets into the multisig.
-Phase 2 sends `total_credit_wei` of those alAssets to credit users.
-Phase 3 then tries to burn `total_mint_wei` — but the multisig only holds `total_mint_wei − total_credit_wei`.
-
-**Shortfall = `total_credit_wei`**. If any credit users exist, Phase 3 burn calls will fail for the last `total_credit_wei` worth of positions.
-
-Fix options:
-- **Option A (recommended):** Add an extra Phase 1 deposit+mint for `total_credit_wei` into a dedicated "protocol reserve" NFT position, then burn it in Phase 3.
-- **Option B:** Reduce each debt user's burn amount proportionally to keep total burns ≤ available balance (leaves residual debt on some positions, not recommended).
-
-### Bug #3 — `deposit()` ABI return type is wrong (cosmetic, no runtime failure)
-
-**File:** `contracts/alchemist_abi.json`
-
-The ABI declares `deposit` as returning `[uint256]` (one value). The actual contract returns `(uint256 tokenId, uint256 debtValue)` — a two-element tuple. Since the script never reads the deposit return value (it uses event logs instead), this causes no runtime error, but the ABI is technically incorrect and would break any code that tries to decode the return.
-
-Fix: update the ABI outputs to `[{"name": "tokenId", "type": "uint256"}, {"name": "debtValue", "type": "uint256"}]`.
-
-### ~~Bug #4~~ — USDC token decimals (Fixed)
-
-USD asset configs in `src/config.py` now set `token_decimals: 6`. All three entry-point scripts (`migrate.py`, `batch.py`, `validate.py`) read `token_decimals` from the asset config and pass it to `validate_csv_file()`, which threads it through to `convert_to_wei()`. ETH configs remain at 18.
-
-CSV `underlyingValue` for USD positions must be in **USDC-decimaled MYT share units** (i.e. values like `5000.123456` where 6 digits after the decimal are significant). Values are multiplied by `10^6` before being sent to the contract.
-
-### Bug #5 — `burn()` only clears unearmarked debt
-
-**File:** `AlchemistV3.sol:526` (contract constraint, not a script bug)
-
-```solidity
-_checkState((debt = _accounts[recipientId].debt - _accounts[recipientId].earmarked) > 0);
-```
-
-If significant time passes between Phase 1 (mint) and Phase 3 (burn), the Transmuter may have earmarked some debt. If all of a position's debt is earmarked, `burn()` reverts. With a fresh V3 deployment and rapid execution of all phases, earmarked amounts should be zero. This is a timing risk, not a hard bug, but phases should be executed without extended delays.
-
-### Bug #6 — Safe nonce stub always returns 0
-
-**File:** `safe.py:ProposeToSafe.get_next_nonce`
-
-```python
-def get_next_nonce(self) -> int:
-    return 0  # STUB
-```
-
-Every batch will be proposed with nonce `0`. The Safe Transaction Service will accept only the first; all subsequent proposals with nonce `0` will be rejected. This must be replaced with a real API call before any production use:
-
-```python
-# GET https://safe-transaction-{chain}.safe.global/api/v1/safes/{safe_address}/
-# Response: { "nonce": N }
-```
-
-### Bug #7 — Test suite tests a deleted API
-
-**File:** `tests/test_transactions.py`
-
-The tests import `load_cdp_abi`, `build_position_transactions`, `build_transfer_tx`, and `_create_deposit_call` — functions that were removed during the v2→v3 refactor. Running `pytest` fails immediately. The test suite needs to be rewritten against the current API (`load_alchemist_abi`, `build_nft_transfer_tx`, etc.).
-
----
-
 ## Pre-Migration Checklist
 
 - [ ] All AlchemistV3 contracts deployed and addresses filled into `src/config.py`
+- [ ] `nft` address set in each asset config (read from `alchemist.alchemistPositionNFT()`)
 - [ ] Migration multisig set as `admin` on each AlchemistV3 (`setAdmin(multisig)`)
 - [ ] Multisig funded with enough MYT shares to cover total deposit amounts (or pre-approved)
-- [ ] Bug #1 fixed: NFT address resolved from `alchemist.alchemistPositionNFT()`
-- [ ] Bug #2 fixed: alAsset balance math accounts for credit distributions
-- [x] Bug #4 fixed: `token_decimals=6` for USD configs; scripts wire it through to `convert_to_wei()`
-- [ ] Bug #6 fixed: Safe nonce fetched from Safe Transaction Service API
 - [ ] Dry run passes on all chains and assets: `ape run migrate --dry-run`
 - [ ] Team has a plan for patching token IDs from Phase 1 events before Phase 3/4
+- [ ] Phase 3 and Phase 4 are not submitted until Phase 1 and Phase 2 are fully confirmed
 
 ---
 
@@ -362,8 +277,6 @@ The tests import `load_cdp_abi`, `build_position_transactions`, `build_transfer_
 pip install pytest eth-ape
 pytest tests/ -v
 ```
-
-> **Note:** The test suite currently fails due to Bug #7 above (stale imports). Fix the tests before running on the current codebase.
 
 ---
 
@@ -382,4 +295,3 @@ pytest tests/ -v
 - The migration multisig temporarily holds all position NFTs and all minted alAssets. It must be a properly secured multi-signature wallet with a threshold high enough to prevent unilateral action.
 - Phase 4 (NFT transfers to users) should only be executed **after team verification** that Phase 1, 2, and 3 have completed correctly.
 - Token ID placeholder `999999` is intentionally invalid — any accidentally submitted Phase 3 or Phase 4 batch with unpatched IDs will revert on-chain.
-- The `ProposeToSafe` API is currently stubbed. No transactions will actually be sent to the Safe Transaction Service without completing Bug #6.
