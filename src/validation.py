@@ -2,8 +2,11 @@
 
 CSV schema: address,underlyingValue,debt
   - address: Ethereum address
-  - underlyingValue: collateral in human units (e.g. 5000.00 USDC or 2.5 WETH)
-  - debt: positive = user owes alAssets; negative = protocol owes user alAssets (credit)
+  - underlyingValue: collateral in atomic/wei units (MYT share token atomic units)
+  - debt: positive = user owes alAssets (atomic units); negative = protocol owes user (credit)
+
+Values are already in the smallest unit of their respective tokens and are passed
+directly to contract calls without further scaling (token_decimals=0 in config).
 
 One file per asset type per chain:
   alUSDValues-sum-and-debt-mainnet.csv
@@ -179,11 +182,9 @@ def validate_csv_file(
 ) -> ValidationResult:
     """Load and validate a migration CSV file.
 
-    token_decimals: decimals for the MYT share token used to convert CSV
-        underlyingValue/debt amounts to wei. MYT share tokens are always 18
-        decimals (standard ERC20), regardless of the underlying asset's own
-        decimal precision (e.g. USDC is 6 decimals but USDCMYT shares are 18).
-        Read this value from AssetConfig.token_decimals rather than hardcoding.
+    token_decimals: scaling factor for CSV values. CSV values are already in
+        atomic/wei units, so this should be 0 (no scaling). Read from
+        AssetConfig.token_decimals; do not hardcode.
 
     Stops immediately on the first invalid row.
     """

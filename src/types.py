@@ -45,8 +45,8 @@ class CSVRow:
     """
 
     address: Address
-    underlying_value: Decimal   # collateral amount (human units, not wei)
-    debt: Decimal               # debt amount; negative = credit
+    underlying_value: Decimal   # collateral in atomic MYT share units (already wei-scale)
+    debt: Decimal               # debt in atomic alToken units (already wei-scale); negative = credit
     row_number: int = 0
 
     @property

@@ -59,7 +59,7 @@ CHAINS: dict[str, ChainConfig] = {
             "al_token": "",
             "underlying": "",
             "nft": "",          # AlchemistV3Position address — fill in after deployment
-            "token_decimals": 6,   # USDC has 6 decimals; CSV underlyingValue is in MYT share units denominated at 6 dp
+            "token_decimals": 0,  # CSV values are already in atomic/wei units — do not multiply
         },
         "eth": {
             "alchemist": "",
@@ -67,7 +67,7 @@ CHAINS: dict[str, ChainConfig] = {
             "al_token": "",
             "underlying": "",
             "nft": "",          # AlchemistV3Position address — fill in after deployment
-            "token_decimals": 18,
+            "token_decimals": 0,  # CSV values are already in atomic/wei units — do not multiply
         },
     },
     "optimism": {
@@ -79,7 +79,7 @@ CHAINS: dict[str, ChainConfig] = {
             "al_token": "",
             "underlying": "",
             "nft": "",          # AlchemistV3Position address — fill in after deployment
-            "token_decimals": 6,   # USDC has 6 decimals; CSV underlyingValue is in MYT share units denominated at 6 dp
+            "token_decimals": 0,  # CSV values are already in atomic/wei units — do not multiply
         },
         "eth": {
             "alchemist": "",
@@ -87,7 +87,7 @@ CHAINS: dict[str, ChainConfig] = {
             "al_token": "",
             "underlying": "",
             "nft": "",          # AlchemistV3Position address — fill in after deployment
-            "token_decimals": 18,
+            "token_decimals": 0,  # CSV values are already in atomic/wei units — do not multiply
         },
     },
     "arbitrum": {
@@ -99,7 +99,7 @@ CHAINS: dict[str, ChainConfig] = {
             "al_token": "",
             "underlying": "",
             "nft": "",          # AlchemistV3Position address — fill in after deployment
-            "token_decimals": 6,   # USDC has 6 decimals; CSV underlyingValue is in MYT share units denominated at 6 dp
+            "token_decimals": 0,  # CSV values are already in atomic/wei units — do not multiply
         },
         "eth": {
             "alchemist": "",
@@ -107,7 +107,7 @@ CHAINS: dict[str, ChainConfig] = {
             "al_token": "",
             "underlying": "",
             "nft": "",          # AlchemistV3Position address — fill in after deployment
-            "token_decimals": 18,
+            "token_decimals": 0,  # CSV values are already in atomic/wei units — do not multiply
         },
     },
 }
