@@ -33,11 +33,12 @@ class ChainConfig(TypedDict):
     eth: AssetConfig               # WETH → alETH path
 
 
-# Per-chain block gas limits (updated post-Pectra for mainnet, 2025-05)
+# Per-chain transaction gas limits (not block gas — a single tx can't fill a block)
+# Mainnet block gas is 60M post-Pectra, but individual tx gas limit is ~15M.
 CHAIN_GAS_LIMITS: dict[str, int] = {
-    "mainnet": 60_000_000,          # Doubled in recent hardfork
-    "optimism": 30_000_000,
-    "arbitrum": 32_000_000,
+    "mainnet": 15_000_000,          # Per-tx limit (block gas is 60M)
+    "optimism": 15_000_000,
+    "arbitrum": 15_000_000,
 }
 
 # Per-chain max transaction calldata size (bytes)
@@ -80,8 +81,8 @@ def get_effective_size_limit(chain: str) -> int:
     return int(base * SIZE_TARGET_PERCENT)
 
 
-# Legacy alias — used by batch stats display
-EFFECTIVE_GAS_LIMIT = get_effective_gas_limit("mainnet")
+# Legacy alias
+EFFECTIVE_GAS_LIMIT = get_effective_gas_limit("mainnet")  # 13,500,000
 
 
 CHAINS: dict[str, ChainConfig] = {

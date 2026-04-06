@@ -240,13 +240,13 @@ Chains: `mainnet`, `optimism`, `arbitrum`
 
 Batches are constrained by three limits (whichever is hit first):
 
-| Chain | Block Gas Limit | Max TX Size | Effective Gas (90%) | Max Calls/Batch |
-|-------|----------------|-------------|--------------------:|----------------:|
-| Ethereum Mainnet | 60M | 128 KB | 54,000,000 | 50 |
-| Optimism | 30M | 120 KB | 27,000,000 | 50 |
-| Arbitrum One | 32M | 118 KB | 28,800,000 | 50 |
+| Chain | Block Gas | TX Gas Limit | Max TX Size | Effective Gas (90%) | Max Calls/Batch |
+|-------|-----------|-------------|-------------|--------------------:|----------------:|
+| Ethereum Mainnet | 60M | 15M | 128 KB | 13,500,000 | 50 |
+| Optimism | 30M | 15M | 120 KB | 13,500,000 | 50 |
+| Arbitrum One | 32M | 15M | 118 KB | 13,500,000 | 50 |
 
-At 50 calls per batch with typical gas costs (~175K per deposit, ~130K per mint, ~70K per transfer), gas utilization is 15-30% per batch. The 50-call limit keeps batches reviewable in the Safe UI.
+At 50 calls per batch with typical gas costs (~175K per deposit, ~130K per mint, ~70K per transfer), gas utilization is ~65% per deposit batch and ~48% per mint batch. The 50-call limit keeps batches reviewable in the Safe UI while staying well under the per-transaction gas limit.
 
 ---
 
@@ -294,11 +294,11 @@ Key behaviors:
 
 ## Chains Supported
 
-| Chain | Chain ID | Multisig | Block Gas |
-|-------|----------|----------|----------:|
-| Ethereum Mainnet | 1 | `0xF56D660138815fC5d7a06cd0E1630225E788293D` | 60M |
-| Optimism | 10 | `0x3Dda174aa9E897e18b8E10e6Ce39c2a52398181d` | 30M |
-| Arbitrum One | 42161 | `0xeE1Aa1C3D0622fCeD823c7720cf9E8079558484b` | 32M |
+| Chain | Chain ID | Multisig | Block Gas | TX Gas |
+|-------|----------|----------|----------:|-------:|
+| Ethereum Mainnet | 1 | `0xF56D660138815fC5d7a06cd0E1630225E788293D` | 60M | 15M |
+| Optimism | 10 | `0x3Dda174aa9E897e18b8E10e6Ce39c2a52398181d` | 30M | 15M |
+| Arbitrum One | 42161 | `0xeE1Aa1C3D0622fCeD823c7720cf9E8079558484b` | 32M | 15M |
 
 ---
 
