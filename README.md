@@ -9,10 +9,11 @@ Python tooling for migrating Alchemix V2 CDP positions to V3 architecture. Reads
 V2 positions cannot be migrated in-place. The protocol must:
 
 1. Read a snapshot of all V2 positions (address, collateral, net debt) from a CSV.
-2. For each user, recreate their position in V3: deposit collateral as MYT shares, mint their debt as alAssets.
-3. Distribute alAssets to users who had a credit balance (the protocol owed them).
-4. Burn the alAssets held by the multisig against each debt position to clear it.
+2. For each user, recreate their position in V3: deposit collateral as MYT shares, mint their debt as alAssets into the multisig.
+3. Team verifies all on-chain positions match the snapshot.
+4. Distribute alAssets to users who had a credit balance (the protocol owed them).
 5. Transfer each position NFT to its original user.
+6. Burn the remaining alAssets held by the multisig directly on the alToken contract.
 
 All transactions are proposed to a Gnosis Safe multisig. No private key is ever used directly — Safe signers approve and execute.
 
@@ -32,7 +33,9 @@ migration_script/
 │   ├── alETHValues-sum-and-debt-mainnet.csv
 │   └── ...                       # One file per asset × chain
 ├── scripts/
-│   ├── migrate.py                # Main entry point — full migration run
+│   ├── phase1.py                 # Script 1 — deposit + mint (run first)
+│   ├── phase2.py                 # Script 2 — credits + NFT transfers + burn (run after verification)
+│   ├── migrate.py                # Preview both phases combined (no submission)
 │   ├── batch.py                  # Show batch statistics only (no submission)
 │   ├── preview.py                # Human-readable plan preview
 │   └── validate.py               # CSV-only validation
@@ -134,48 +137,52 @@ Rules:
 - Rows with `underlyingValue = 0` are rejected (users with no collateral are not migrated).
 - Values must be plain integers in wei — no scientific notation, no decimals.
 
-> **Decimal precision:** USD positions use `token_decimals=6` (USDC). ETH positions use `token_decimals=18`. The `underlyingValue` column must be in MYT share units denominated at the correct decimal precision for the asset.
+> **Decimal precision:** Both USDCMYT and WETHMYT are standard 18-decimal ERC-4626 vault tokens. All values in the CSV are already in 18-decimal atomic units — no rescaling is applied.
 
 ---
 
 ## Migration Flow
 
-The migration proceeds in four phases per asset per chain. Each phase becomes one or more Safe multisig transactions, batched to stay under ~14.4M gas (90% of the 16M block gas limit).
+The migration runs as **two scripts** per asset per chain. Each script produces one or more Safe multisig transactions, batched to stay under ~14.4M gas (90% of the 16M block gas limit).
 
 ```
-Phase 1 — Deposit + Mint
+Script 1 — Deposit + Mint  (phase1.py)
   For each user:
     setDepositCap(currentCap + batchDepositSum)
-    deposit(myt_shares, multisig, tokenId=0)   → mints new NFT, emits AlchemistV3PositionNFTMinted
-    mint(tokenId, debt_amount, multisig)?       → if debt > 0, mints alAssets to multisig
+    deposit(myt_shares, multisig, tokenId=0)       → mints NFT, emits AlchemistV3PositionNFTMinted
+    mint(tokenId, mint_amount, multisig)?           → if user has debt or credit, mints alAssets to multisig
 
-Phase 2 — Credit Distribution
-  For each credit user:
-    alToken.transfer(user_address, credit_amount)  → sends alAssets from multisig to user
+  After Script 1: team verifies all on-chain positions match snapshot data.
 
-Phase 3 — Burn Debt
-  For each debt user:
-    alchemist.burn(debt_amount, tokenId)           → burns alAssets from multisig, clears position debt
+Script 2 — Distribute + Burn  (phase2.py)
+  Credit distribution:
+    alToken.transfer(user_address, credit_amount)  → for each credit user
+
+  NFT transfers:
+    ERC721.transferFrom(multisig, user_address, tokenId)   → for all users
     ⚠ Token IDs are PLACEHOLDERS — must be patched first (see below)
 
-Phase 4 — NFT Transfer
-  For each user:
-    ERC721.transferFrom(multisig, user_address, tokenId)
-    ⚠ Token IDs are PLACEHOLDERS — must be patched first (see below)
+  Final burn:
+    alToken.burn(remaining_balance)                → burns leftover alAssets on the alToken contract directly
+    (fallback: alToken.transfer(0x000...000, remaining_balance) via --burn-fallback flag)
 ```
+
+**What ends up where:**
+- Debt users receive their NFT with debt equal to their V2 debt. The corresponding alTokens minted by the multisig are burned in the final burn step.
+- Credit users receive their NFT and a direct alToken transfer equal to their credit. They can use those tokens to repay their position debt themselves.
 
 ### Token ID Patching (Critical Manual Step)
 
-Token IDs are assigned by the AlchemistV3 contract on-chain at deposit time. They are not predictable before Phase 1 executes. The script uses `999999` as a placeholder in Phase 3 and Phase 4 calldata.
+Token IDs are assigned by the AlchemistV3 contract on-chain at deposit time. They are not predictable before Script 1 executes. The script uses `999999` as a placeholder in the Script 2 transfer batch calldata.
 
-**After Phase 1 executes:**
+**After Script 1 executes:**
 
-1. Query all `AlchemistV3PositionNFTMinted(address indexed to, uint256 indexed tokenId)` events from the Phase 1 transactions.
+1. Query all `AlchemistV3PositionNFTMinted(address indexed to, uint256 indexed tokenId)` events from the Script 1 transactions.
 2. Match each event's `to` address (the multisig) and `tokenId` to the corresponding user by deposit order.
-3. Replace every `999999` placeholder in the Phase 3 (burn) and Phase 4 (transfer) batches with the real tokenId.
-4. Re-verify the patched calldata before signing and submitting Phase 3 and Phase 4.
+3. Replace every `999999` placeholder in the Script 2 transfer batches with the real tokenId.
+4. Re-verify the patched calldata before signing and submitting Script 2.
 
-> There is currently no automated tooling for this step. It must be done manually or via a separate script before Phase 3 and Phase 4 are proposed to Safe.
+> There is currently no automated tooling for this step. It must be done manually or via a separate script before Script 2 is proposed to Safe.
 
 ---
 
@@ -193,26 +200,32 @@ ape run validate --chain mainnet --asset eth
 ```bash
 ape run batch --chain mainnet --asset usd
 ape run batch --chain mainnet --asset usd --verbose
+ape run migrate --chain mainnet --asset usd        # combined preview of both scripts
 ```
 
-### Full dry run (builds plan, no Safe proposals)
+### Script 1 — Deposit + Mint
 
 ```bash
-ape run migrate --chain mainnet --asset usd --dry-run
-ape run migrate --chain mainnet --asset eth --dry-run --verbose
+# Dry run first
+ape run phase1 --chain mainnet --asset usd --dry-run
+
+# Execute (auto-confirm)
+ape run phase1 --chain mainnet --asset usd --yes
 ```
 
-### Execute migration
+### Script 2 — Distribute + Burn
+
+Run only after Script 1 is complete and team has verified on-chain positions.
 
 ```bash
-# USD positions on mainnet
-ape run migrate --chain mainnet --asset usd
+# Dry run first
+ape run phase2 --chain mainnet --asset usd --dry-run
 
-# With auto-confirm (no interactive prompt)
-ape run migrate --chain mainnet --asset usd --yes
+# Execute
+ape run phase2 --chain mainnet --asset usd --yes
 
-# ETH positions
-ape run migrate --chain mainnet --asset eth
+# If alToken.burn() is unavailable, fall back to transfer to zero address
+ape run phase2 --chain mainnet --asset usd --yes --burn-fallback
 ```
 
 Chains: `mainnet`, `optimism`, `arbitrum`
@@ -223,22 +236,20 @@ Chains: `mainnet`, `optimism`, `arbitrum`
 
 All calldata is encoded against these verified v3 signatures (confirmed against `y-monorepo` branch):
 
-| Function | Signature | Access |
-|----------|-----------|--------|
-| `setDepositCap` | `setDepositCap(uint256 value)` | `onlyAdmin` |
-| `deposit` | `deposit(uint256 amount, address recipient, uint256 tokenId) → (uint256 tokenId, uint256 debtValue)` | open |
-| `mint` | `mint(uint256 tokenId, uint256 amount, address recipient)` | NFT owner |
-| `burn` | `burn(uint256 amount, uint256 recipientId) → uint256` | open (burns caller's alAssets) |
-| `transferFrom` (NFT) | `transferFrom(address from, address to, uint256 tokenId)` | ERC721 standard |
-| `alToken.transfer` | `transfer(address to, uint256 amount) → bool` | ERC20 standard |
+| Contract | Function | Signature | Access |
+|----------|----------|-----------|--------|
+| AlchemistV3 | `setDepositCap` | `setDepositCap(uint256 value)` | `onlyAdmin` |
+| AlchemistV3 | `deposit` | `deposit(uint256 amount, address recipient, uint256 tokenId) → (uint256 tokenId, uint256 debtValue)` | open |
+| AlchemistV3 | `mint` | `mint(uint256 tokenId, uint256 amount, address recipient)` | NFT owner |
+| AlchemistV3Position | `transferFrom` | `transferFrom(address from, address to, uint256 tokenId)` | ERC721 standard |
+| alToken | `transfer` | `transfer(address to, uint256 amount) → bool` | ERC20 standard |
+| alToken | `burn` | `burn(uint256 amount) → bool` | ERC20Burnable — any holder |
 
 Key behaviors:
 - `deposit(amount, recipient, 0)` — passing `tokenId=0` creates a new position and mints the NFT to `recipient`. The actual tokenId is emitted in `AlchemistV3PositionNFTMinted`.
 - `mint(tokenId, amount, multisig)` — `msg.sender` must be the NFT owner (multisig during migration). alAssets land in the multisig, not the user.
-- `burn(amount, tokenId)` — burns alAssets held by `msg.sender` (multisig) against a specific position's unearmarked debt. Cannot be called in the same block as `mint`.
+- `alToken.burn(amount)` — burns alAssets held by the caller (multisig) directly on the alToken contract. Does NOT interact with AlchemistV3 and does not affect position debt. Used in Script 2 to destroy the leftover alAssets minted for debt users.
 - `setDepositCap` — requires multisig to be set as admin on each AlchemistV3 before the migration starts.
-
-> **Timing:** If significant time passes between Phase 1 and Phase 3, the Transmuter may earmark some debt. `burn()` only clears unearmarked debt — if all of a position's debt is earmarked, the call will revert. Execute all phases promptly after Phase 1.
 
 ---
 
@@ -251,9 +262,9 @@ Key behaviors:
 | `deposit` (large, > 10²¹ wei) | 190,000 |
 | `mint` | 130,000 |
 | `mint` (large) | 145,000 |
-| `burn` | 120,000 |
-| `alToken.transfer` | 65,000 |
+| `alToken.transfer` (credit) | 65,000 |
 | `ERC721.transferFrom` | 70,000 |
+| `alToken.burn` (final burn) | 35,000 |
 
 Batches target 90% of 16M gas = **14,400,000 gas** per Safe transaction.
 
@@ -265,9 +276,9 @@ Batches target 90% of 16M gas = **14,400,000 gas** per Safe transaction.
 - [ ] `nft` address set in each asset config (read from `alchemist.alchemistPositionNFT()`)
 - [ ] Migration multisig set as `admin` on each AlchemistV3 (`setAdmin(multisig)`)
 - [ ] Multisig funded with enough MYT shares to cover total deposit amounts (or pre-approved)
-- [ ] Dry run passes on all chains and assets: `ape run migrate --dry-run`
-- [ ] Team has a plan for patching token IDs from Phase 1 events before Phase 3/4
-- [ ] Phase 3 and Phase 4 are not submitted until Phase 1 and Phase 2 are fully confirmed
+- [ ] Dry run passes on all chains and assets: `ape run phase1 --dry-run` and `ape run phase2 --dry-run`
+- [ ] Team has a plan for patching token IDs from Script 1 events before Script 2 NFT transfers
+- [ ] Script 2 is not submitted until Script 1 is fully confirmed and positions are verified on-chain
 
 ---
 
@@ -293,5 +304,6 @@ pytest tests/ -v
 ## Security Notes
 
 - The migration multisig temporarily holds all position NFTs and all minted alAssets. It must be a properly secured multi-signature wallet with a threshold high enough to prevent unilateral action.
-- Phase 4 (NFT transfers to users) should only be executed **after team verification** that Phase 1, 2, and 3 have completed correctly.
-- Token ID placeholder `999999` is intentionally invalid — any accidentally submitted Phase 3 or Phase 4 batch with unpatched IDs will revert on-chain.
+- Script 2 (NFT transfers and burn) should only be executed **after team verification** that Script 1 has completed correctly and all on-chain positions match the snapshot data.
+- Token ID placeholder `999999` is intentionally invalid — any accidentally submitted Script 2 transfer batch with unpatched IDs will revert on-chain.
+- `alToken.burn()` does not interact with AlchemistV3 and does not clear position debt. Debt user positions will carry their V2 debt on the NFT after migration. This is intentional — the burned alTokens are the supply side; the debt side lives on the user's position.
