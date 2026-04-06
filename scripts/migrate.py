@@ -139,7 +139,9 @@ def cli(
     alchemist = asset_config.get("alchemist", "") or "0x" + "0" * 40
     al_token = asset_config.get("al_token", "") or "0x" + "0" * 40
     myt = asset_config.get("myt", "") or "0x" + "0" * 40
-    nft = alchemist  # Position NFT address — same as alchemist for now (check actual deployment)
+    # AlchemistV3Position NFT contract — separate from AlchemistV3.
+    # Read from alchemist.alchemistPositionNFT() after deployment; set "nft" in asset config.
+    nft = asset_config.get("nft", "") or "0x" + "0" * 40
 
     # =========================================================================
     # Step 2: Build plan

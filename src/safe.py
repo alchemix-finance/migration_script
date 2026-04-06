@@ -17,6 +17,9 @@ The MultiSend contract packs transactions as:
 operation (1 byte) + to (20 bytes) + value (32 bytes) + data_length (32 bytes) + data (variable)
 """
 
+import json as json_lib
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any
@@ -333,6 +336,7 @@ class ProposeToSafe:
         self.safe_address = safe_address
         self.chain_id = chain_id
         self.signer_address = signer_address
+        self._next_nonce: int | None = None
 
         if api_url:
             self.api_url = api_url
@@ -344,18 +348,23 @@ class ProposeToSafe:
                 )
 
     def get_next_nonce(self) -> int:
-        """Get the next available nonce for the Safe.
-
-        In production, this would query the Safe Transaction Service.
-        For now, returns a placeholder.
+        """Fetch the next available nonce from the Safe Transaction Service.
 
         Returns:
-            Next available nonce
+            Next available nonce for the Safe
+
+        Raises:
+            ValueError: If the API call fails
         """
-        # STUB: In production, query the API
-        # GET {api_url}/api/v1/safes/{safe_address}/
-        # Response includes "nonce" field
-        return 0
+        url = f"{self.api_url}/api/v1/safes/{self.safe_address}/"
+        try:
+            with urllib.request.urlopen(url, timeout=10) as response:
+                data = json_lib.loads(response.read().decode())
+                return int(data["nonce"])
+        except urllib.error.URLError as e:
+            raise ValueError(f"Failed to fetch Safe nonce from {url}: {e}")
+        except (KeyError, ValueError) as e:
+            raise ValueError(f"Unexpected response from Safe API: {e}")
 
     def propose_batch(
         self,
@@ -381,23 +390,21 @@ class ProposeToSafe:
         if not sender:
             raise ValueError("Sender address required for proposal")
 
-        # Set nonce if not already set
-        if safe_tx.nonce is None:
-            safe_tx.nonce = self.get_next_nonce()
+        # Fetch nonce on first call, then increment locally
+        if self._next_nonce is None:
+            self._next_nonce = self.get_next_nonce()
 
-        # Serialize for API
+        safe_tx.nonce = self._next_nonce
+        self._next_nonce += 1
+
         tx_data = serialize_for_safe_api(safe_tx)
 
-        # STUB: In production, this would:
-        # 1. Compute the Safe transaction hash
-        # 2. Sign the hash with the sender's private key
-        # 3. POST to {api_url}/api/v1/safes/{safe_address}/multisig-transactions/
-        #
-        # For now, return a mock response indicating what would be submitted
-
+        # STUB: Replace this block with actual HTTP POST to Safe API
+        # POST {api_url}/api/v1/safes/{safe_address}/multisig-transactions/
+        # Body: tx_data + signature from sender
         return {
             "status": "stubbed",
-            "message": "Transaction proposal prepared but not submitted (stubbed)",
+            "message": "Transaction proposal prepared but not submitted (HTTP POST not yet implemented)",
             "safe_address": self.safe_address,
             "chain_id": self.chain_id,
             "sender": sender,
@@ -420,6 +427,21 @@ class ProposeToSafe:
         Returns:
             List of proposal results
         """
+        # Pre-fetch nonce so a single failure is caught before any proposals are made.
+        # If the Safe is not yet deployed or the chain is wrong, fall back to nonce 0
+        # with a warning so callers can still inspect prepared transaction data.
+        if self._next_nonce is None:
+            try:
+                self._next_nonce = self.get_next_nonce()
+            except ValueError as e:
+                import warnings
+                warnings.warn(
+                    f"Could not fetch Safe nonce ({e}); defaulting to nonce 0. "
+                    "Proposals may be rejected if the Safe already has pending transactions.",
+                    stacklevel=2,
+                )
+                self._next_nonce = 0
+
         results = []
         for safe_tx in safe_txs:
             result = self.propose_batch(safe_tx, sender)

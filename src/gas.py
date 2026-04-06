@@ -146,13 +146,20 @@ def create_burn_batches(
     alchemist_address: str,
     gas_limit: int = EFFECTIVE_GAS_LIMIT,
 ) -> list[TransactionBatch]:
-    """Create burn batches: one burn(amount, tokenId) per debt user.
+    """Create burn batches: one burn(amount, tokenId) per position with mint_amount_wei > 0.
+
+    Covers two cases:
+      - Debt users:   burn their real debt (mint_amount_wei == their original debt).
+      - Credit users: burn the temporary debt that was minted in Phase 1 to fund credit
+                      distribution. Their mint_amount_wei == credit_amount_wei, so after
+                      Phase 2 distributes those alAssets to them, this burn clears the
+                      position back to zero debt. Math: minted == burned, net = 0. ✓
 
     Token IDs are placeholders (999999) — must be patched before submission
     based on actual token IDs from deposit events.
 
-    These batches are executed AFTER all deposit batches are complete and
-    token IDs are known.
+    These batches are executed AFTER credit_batches so the multisig has already
+    distributed the credit alAssets before burning.
     """
     from src.transactions import build_burn_tx
 
@@ -277,13 +284,27 @@ def build_migration_plan(
 
     Returns a MigrationPlan with all four batch phases:
       1. deposit_batches  — [setDepositCap, deposit, mint?] per user
-      2. credit_batches   — alToken.transfer to credit users (uses minted pool)
-      3. burn_batches     — burn alAssets per debt user position
+                            Credit users are included here: they get a mint equal to
+                            their credit_amount_wei, creating a temporary debt that is
+                            cleared in Phase 3.
+      2. credit_batches   — alToken.transfer to credit users (distributes their alAssets)
+      3. burn_batches     — burn alAssets for ALL positions with mint_amount_wei > 0
+                            (debt users burn their real debt; credit users burn the temp
+                            debt minted in Phase 1 — math balances because the alAssets
+                            were already sent to the users in Phase 2)
       4. transfer_batches — NFT transferFrom to each user
 
     Phase ordering:
       deposit → credit → burn → transfer
-      (credit before burn so multisig holds sufficient alAssets when distributing)
+      (credit before burn so the multisig distributes alAssets before burning the
+       temporary credit-user debt; burn total == mint total, so the books close cleanly)
+
+    Why credit users appear in BOTH credit_batches AND burn_batches:
+      Phase 1 mints credit_amount_wei to multisig (temp debt on their position).
+      Phase 2 sends those alAssets out to the user.
+      Phase 3 burns mint_amount_wei (== credit_amount_wei) back from multisig,
+      clearing the temp debt. Net effect on multisig alAsset balance: zero.
+      Net effect on user position: zero debt, correct collateral. ✓
     """
     from src.types import AssetType, MigrationPlan
 
@@ -300,8 +321,10 @@ def build_migration_plan(
         plan.credit_users, al_token_address, gas_limit,
     )
 
+    # Include all positions that have mint_amount_wei > 0: both true debt users and credit
+    # users whose temporary Phase 1 mint must be burned to clear their position.
     plan.burn_batches = create_burn_batches(
-        plan.debt_users, alchemist_address, gas_limit,
+        [p for p in plan.positions if p.mint_amount_wei > 0], alchemist_address, gas_limit,
     )
 
     plan.transfer_batches = create_transfer_batches(

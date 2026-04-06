@@ -70,14 +70,24 @@ class PositionMigration:
     """One user's position to be migrated — per asset type.
 
     Flow:
-      1. deposit(deposit_amount_wei, multisig, 0)  → receives token_id from contract
-      2. if mint_amount_wei > 0: mint(token_id, mint_amount_wei, multisig)
-         — alAssets land in multisig, user's debt is recorded on position
+      Phase 1 — deposit_batches (per user):
+        1a. deposit(deposit_amount_wei, multisig, 0)  → receives token_id from contract
+        1b. if mint_amount_wei > 0: mint(token_id, mint_amount_wei, multisig)
+            — alAssets land in multisig, user's debt is recorded on position
+            — applies to BOTH debt users (mint = their debt) AND credit users
+              (mint = their credit_amount, creating a temporary debt that is
+               burned in Phase 3)
 
     After all positions are created and verified:
-      3. Transfer credit alAssets to credit_amount_wei users
-      4. burn(debt_amount, token_id) on Alchemist for each debt user → clears debt
-      5. transferFrom(multisig, user, token_id)
+      Phase 2 — credit_batches:
+        2. alToken.transfer(user, credit_amount_wei) for each credit user
+           (multisig distributes their alAssets)
+      Phase 3 — burn_batches:
+        3. burn(mint_amount_wei, token_id) for every position where mint_amount_wei > 0
+           — debt users: clears their real debt
+           — credit users: clears the temporary debt created in Phase 1
+      Phase 4 — transfer_batches:
+        4. transferFrom(multisig, user, token_id) for all users
     """
 
     user_address: Address
@@ -85,8 +95,8 @@ class PositionMigration:
     chain: str
 
     deposit_amount_wei: Wei         # MYT shares to deposit (1:1 with underlying at migration time)
-    mint_amount_wei: Wei            # alAssets to mint (0 for credit users)
-    credit_amount_wei: Wei          # alAssets owed to user (0 for debt users)
+    mint_amount_wei: Wei            # alAssets to mint; equals credit_amount_wei for credit users (temp debt, burned in Phase 3)
+    credit_amount_wei: Wei          # alAssets owed to user (0 for pure debt users)
 
     # Assigned at generation time, before batching
     token_id: TokenId = 0           # Filled in after deposit tx executes (0 = auto-assign)
@@ -100,12 +110,21 @@ class PositionMigration:
             raise ValueError("mint_amount_wei cannot be negative")
         if self.credit_amount_wei < 0:
             raise ValueError("credit_amount_wei cannot be negative")
-        # A user cannot simultaneously have debt AND credit
-        if self.mint_amount_wei > 0 and self.credit_amount_wei > 0:
-            raise ValueError("Position cannot have both mint_amount and credit_amount")
+        # NOTE: credit users intentionally have BOTH mint_amount_wei > 0 AND credit_amount_wei > 0.
+        # Phase 1 mints credit_amount_wei to the multisig (creating a temporary debt on their
+        # position), Phase 2 distributes that amount to the user, and Phase 3 burns it back to
+        # clear the temporary debt. Net result: zero debt, math balances. The old guard that
+        # raised ValueError here has been removed to allow this intentional dual-state.
 
     @property
     def is_debt_user(self) -> bool:
+        return self.mint_amount_wei > 0
+
+    @property
+    def needs_burn(self) -> bool:
+        """True for any position that requires a burn in Phase 3 (debt users and credit users
+        whose temp mint must be cleared). Equivalent to is_debt_user; provided as a clearer
+        name for burn-phase logic."""
         return self.mint_amount_wei > 0
 
     @property
@@ -177,8 +196,15 @@ class MigrationPlan:
 
     @property
     def total_burn_wei(self) -> int:
-        """alAssets to burn = total minted - total credit owed to credit users."""
-        return self.total_mint_wei - self.total_credit_wei
+        """alAssets to burn = all minted amounts (debt users + credit users who had temp mints).
+
+        With the corrected credit-user flow, credit users have mint_amount_wei == credit_amount_wei,
+        so total_mint_wei already equals total_burn_wei. No subtraction needed: the multisig
+        holds exactly total_mint_wei after Phase 1, sends total_credit_wei out in Phase 2, and
+        the remaining (total_mint_wei - total_credit_wei) plus the credit users' own burns
+        together equal total_mint_wei. Math check: sum of all p.mint_amount_wei across positions.
+        """
+        return sum(p.mint_amount_wei for p in self.positions)
 
     @property
     def debt_users(self) -> list[PositionMigration]:

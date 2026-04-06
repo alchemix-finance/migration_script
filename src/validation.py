@@ -147,12 +147,18 @@ def position_from_row(
     so deposit_amount_wei = underlying_value_wei.
 
     Debt:
-      positive → mint that amount as alAssets → goes to multisig
-      negative → credit user → they receive abs(debt) alAssets after all minting
-      zero     → deposit only, no mint, no credit
+      positive → real debt user: mint that amount as alAssets to multisig; no credit.
+      negative → credit user: mint abs(debt) to multisig as a temporary debt (Phase 1),
+                 distribute abs(debt) alAssets to the user (Phase 2), then burn the
+                 temp debt back in Phase 3. Both mint_amount_wei AND credit_amount_wei
+                 are set to abs(debt) — this is intentional and required for math to
+                 balance. See PositionMigration docstring for full phase description.
+      zero     → deposit only, no mint, no credit.
     """
     deposit_wei = convert_to_wei(row.underlying_value, token_decimals)
-    mint_wei = convert_to_wei(row.debt, token_decimals) if row.debt > 0 else 0
+    mint_wei = convert_to_wei(row.debt, token_decimals) if row.debt > 0 else (
+        convert_to_wei(abs(row.debt), token_decimals) if row.debt < 0 else 0
+    )
     credit_wei = convert_to_wei(abs(row.debt), token_decimals) if row.debt < 0 else 0
 
     return PositionMigration(
@@ -172,6 +178,12 @@ def validate_csv_file(
     token_decimals: int = 18,
 ) -> ValidationResult:
     """Load and validate a migration CSV file.
+
+    token_decimals: decimals for the MYT share token used to convert CSV
+        underlyingValue/debt amounts to wei. MYT share tokens are always 18
+        decimals (standard ERC20), regardless of the underlying asset's own
+        decimal precision (e.g. USDC is 6 decimals but USDCMYT shares are 18).
+        Read this value from AssetConfig.token_decimals rather than hardcoding.
 
     Stops immediately on the first invalid row.
     """

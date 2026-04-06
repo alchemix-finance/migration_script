@@ -17,6 +17,9 @@ class AssetConfig(TypedDict):
     myt: str            # MYT token (USDCMYT or WETHMYT)
     al_token: str       # alUSD or alETH token
     underlying: str     # USDC or WETH
+    nft: str            # AlchemistV3Position contract — separate from AlchemistV3. Read from alchemist.alchemistPositionNFT()
+    # MYT share tokens use 18 decimals. CSV underlyingValue must be in MYT share units, not raw underlying units.
+    token_decimals: int  # Decimals for MYT share amounts in CSV (typically 18)
 
 
 class ChainConfig(TypedDict):
@@ -55,12 +58,16 @@ CHAINS: dict[str, ChainConfig] = {
             "myt": "",
             "al_token": "",
             "underlying": "",
+            "nft": "",          # AlchemistV3Position address — fill in after deployment
+            "token_decimals": 18,
         },
         "eth": {
             "alchemist": "",
             "myt": "",
             "al_token": "",
             "underlying": "",
+            "nft": "",          # AlchemistV3Position address — fill in after deployment
+            "token_decimals": 18,
         },
     },
     "optimism": {
@@ -71,12 +78,16 @@ CHAINS: dict[str, ChainConfig] = {
             "myt": "",
             "al_token": "",
             "underlying": "",
+            "nft": "",          # AlchemistV3Position address — fill in after deployment
+            "token_decimals": 18,
         },
         "eth": {
             "alchemist": "",
             "myt": "",
             "al_token": "",
             "underlying": "",
+            "nft": "",          # AlchemistV3Position address — fill in after deployment
+            "token_decimals": 18,
         },
     },
     "arbitrum": {
@@ -87,12 +98,16 @@ CHAINS: dict[str, ChainConfig] = {
             "myt": "",
             "al_token": "",
             "underlying": "",
+            "nft": "",          # AlchemistV3Position address — fill in after deployment
+            "token_decimals": 18,
         },
         "eth": {
             "alchemist": "",
             "myt": "",
             "al_token": "",
             "underlying": "",
+            "nft": "",          # AlchemistV3Position address — fill in after deployment
+            "token_decimals": 18,
         },
     },
 }

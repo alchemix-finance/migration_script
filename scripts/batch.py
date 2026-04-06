@@ -56,7 +56,9 @@ def cli(cli_ctx, chain: str, asset: str, verbose: bool) -> None:
         chain=chain,
         alchemist_address=alchemist,
         al_token_address=al_token,
-        nft_address=alchemist,
+        # NFT address comes from asset config — AlchemistV3Position is separate from AlchemistV3.
+        # Populate "nft" in config after deployment (read from alchemist.alchemistPositionNFT()).
+        nft_address=asset_config.get("nft", "") or alchemist,
         multisig=multisig,
     )
 

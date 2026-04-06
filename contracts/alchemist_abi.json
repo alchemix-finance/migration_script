@@ -17,7 +17,8 @@
       { "name": "tokenId", "type": "uint256", "internalType": "uint256" }
     ],
     "outputs": [
-      { "name": "", "type": "uint256", "internalType": "uint256" }
+      { "name": "tokenId", "type": "uint256", "internalType": "uint256" },
+      { "name": "debtValue", "type": "uint256", "internalType": "uint256" }
     ],
     "stateMutability": "nonpayable"
   },
