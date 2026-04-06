@@ -16,7 +16,6 @@ from src.config import (
     get_asset_config,
     get_chain_config,
     get_csv_path,
-    get_effective_gas_limit,
     get_supported_chains,
     validate_asset_config,
     verify_asset_config,
@@ -123,7 +122,7 @@ def cli(
         chain=chain,
     )
 
-    ok, errors = verify_batch_gas_limits(batches)
+    ok, errors = verify_batch_gas_limits(batches, chain=chain)
     if not ok:
         for err in errors:
             click.echo(click.style(f"  {err}", fg="red"))

@@ -5,14 +5,14 @@ Usage:
     ape run read_ids --chain mainnet --asset usd --from-block 12345678
     ape run read_ids --chain mainnet --asset usd --from-block 12345678 --to-block 12345700
 
-Run this AFTER `ape run phase1` has fully executed on-chain.
+Run this AFTER `ape run deposit` has fully executed on-chain.
 
 Queries the AlchemistV3Position NFT contract for ERC721 Transfer events
 where from=address(0) (mint) and to=multisig. These correspond 1:1 with
-the deposit() calls from phase1, in the same order as the CSV.
+the deposit() calls, in the same order as the CSV.
 
 Writes the mapping to: data/token_ids-{alUSD|alETH}-{chain}.json
-This file is consumed by `ape run mint` and `ape run phase2`.
+This file is consumed by `ape run mint` and `ape run distribute`.
 """
 
 import json
@@ -40,7 +40,7 @@ ZERO_ADDRESS_TOPIC = "0x" + "0" * 64
 @click.command()
 @click.option("--chain", "chain_name", type=click.Choice(get_supported_chains()), required=True)
 @click.option("--asset", type=click.Choice(["usd", "eth"]), required=True)
-@click.option("--from-block", type=int, required=True, help="Block number where phase1 deposits started.")
+@click.option("--from-block", type=int, required=True, help="Block number where deposit script started.")
 @click.option("--to-block", type=int, default=None, help="End block (default: latest).")
 @ape_cli_context()
 def cli(cli_ctx, chain_name: str, asset: str, from_block: int, to_block: int | None) -> None:
