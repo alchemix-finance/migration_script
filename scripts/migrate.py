@@ -1,20 +1,14 @@
 #!/usr/bin/env python3
 """Migration entry point — delegates to phase1 and phase2.
 
-The migration runs as two separate scripts:
+The migration runs in four steps:
 
-  Script 1:  ape run phase1 --chain <chain> --asset <asset>
-    - Deposits MYT for all users
-    - Creates NFT positions (owned by multisig)
-    - Mints alAssets to multisig for all users with debt or credit
-    - Team verifies positions match snapshot before running Script 2
+  1. ape run phase1    — deposit MYT, create NFT positions (no mint yet)
+  2. ape run read_ids  — read AlchemistV3PositionNFTMinted events → token ID map
+  3. ape run mint      — mint alAssets using real token IDs from the map
+  4. ape run phase2    — send credits + NFTs to users, burn remaining alAssets
 
-  Script 2:  ape run phase2 --chain <chain> --asset <asset>
-    - Sends credited alAssets to credit users
-    - Transfers NFTs to all users
-    - Burns remaining alAssets via alToken.burn() (or --burn-fallback for transfer to 0x000)
-
-Run this script for a combined dry-run preview of both phases.
+Run this script for a combined preview of all steps.
 """
 
 import click
@@ -79,12 +73,11 @@ def cli(cli_ctx, chain: str, asset: str, verbose: bool) -> None:
         multisig=multisig,
     )
 
-    s2_batches = (
-        plan.credit_batches
-        + plan.transfer_batches
+    all_batches = (
+        plan.deposit_batches + plan.mint_batches
+        + plan.credit_batches + plan.transfer_batches
         + ([plan.final_burn_batch] if plan.final_burn_batch else [])
     )
-    all_batches = plan.deposit_batches + s2_batches
 
     ok, errors = verify_batch_gas_limits(all_batches)
     if not ok:
@@ -93,14 +86,15 @@ def cli(cli_ctx, chain: str, asset: str, verbose: bool) -> None:
         raise SystemExit(1)
 
     click.echo(f"\nChain: {chain} | Asset: {asset_type.value}")
-    click.echo(f"Script 1 Safe txns: {len(plan.deposit_batches)}")
-    click.echo(f"Script 2 Safe txns: {len(s2_batches)}")
 
     print_migration_plan(plan, chain_config, asset_config, verbose=verbose)
 
     click.echo(click.style(
         "\nTo execute:\n"
-        f"  Script 1:  ape run phase1 --chain {chain} --asset {asset}\n"
-        f"  Script 2:  ape run phase2 --chain {chain} --asset {asset}",
+        f"  1. ape run phase1 --chain {chain} --asset {asset}\n"
+        f"  2. ape run read_ids --chain {chain} --asset {asset} --from-block <N>\n"
+        f"  3. ape run mint --chain {chain} --asset {asset}\n"
+        f"  4. (team verifies)\n"
+        f"  5. ape run phase2 --chain {chain} --asset {asset}",
         fg="cyan",
     ))

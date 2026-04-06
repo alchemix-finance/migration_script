@@ -7,10 +7,10 @@ Usage:
     ape run phase2 --chain mainnet --asset usd --burn-fallback   # transfer to 0x000... instead
 
 Run ONLY after:
-  1. Script 1 (phase1) has fully executed on-chain.
-  2. Team has verified all NFT positions match the snapshot data.
-  3. Token IDs from AlchemistV3PositionNFTMinted events have been patched
-     into the transfer batch calldata.
+  1. `ape run phase1` (deposits) has fully executed on-chain.
+  2. `ape run read_ids` has captured the token ID mapping.
+  3. `ape run mint` has minted alAssets using real token IDs.
+  4. Team has verified all positions match the snapshot data.
 
 Order of operations:
   a. Credit distribution — alToken.transfer(user, amount) for each credit user
@@ -29,6 +29,7 @@ from src.config import (
     get_chain_config,
     get_csv_path,
     get_supported_chains,
+    load_token_id_map,
     validate_asset_config,
     verify_asset_config,
 )
@@ -139,6 +140,22 @@ def cli(
     al_token = asset_config.get("al_token", "") or "0x" + "0" * 40
     nft = asset_config.get("nft", "") or "0x" + "0" * 40
 
+    # Load token ID mapping (required for NFT transfers)
+    if not dry_run:
+        try:
+            token_id_map = load_token_id_map(chain, asset_type)
+        except FileNotFoundError as e:
+            click.echo(click.style(f"\nError: {e}", fg="red"))
+            raise SystemExit(1)
+        click.echo(f"Loaded {len(token_id_map)} token IDs from mapping")
+    else:
+        try:
+            token_id_map = load_token_id_map(chain, asset_type)
+            click.echo(f"Loaded {len(token_id_map)} token IDs from mapping")
+        except FileNotFoundError:
+            token_id_map = None
+            click.echo(click.style("Warning: no token ID map — transfers will use placeholder 999999", fg="yellow"))
+
     # =========================================================================
     # Step 2: Build plan
     # =========================================================================
@@ -152,6 +169,7 @@ def cli(
         nft_address=nft,
         multisig=multisig,
         use_burn_fallback=burn_fallback,
+        token_id_map=token_id_map,
     )
 
     s2_batches = (

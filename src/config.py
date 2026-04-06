@@ -126,6 +126,27 @@ ALCHEMIST_ABI_PATH = CONTRACTS_DIR / "alchemist_abi.json"
 ERC721_ABI_PATH = CONTRACTS_DIR / "erc721_abi.json"
 ALTOKEN_ABI_PATH = CONTRACTS_DIR / "altoken_abi.json"
 
+
+def get_token_ids_path(chain: str, asset_type: "AssetType") -> Path:
+    """Return path for the token ID mapping JSON written by read_ids.py."""
+    from src.types import AssetType as AT
+    prefix = "alUSD" if asset_type == AT.USD else "alETH"
+    return DATA_DIR / f"token_ids-{prefix}-{chain.lower()}.json"
+
+
+def load_token_id_map(chain: str, asset_type: "AssetType") -> dict[str, int]:
+    """Load the user→tokenId mapping from JSON. Keys are lowercase addresses."""
+    import json
+    path = get_token_ids_path(chain, asset_type)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Token ID map not found: {path}\n"
+            f"Run `ape run read_ids --chain {chain} --asset {'usd' if str(asset_type) == 'AssetType.USD' or str(asset_type) == 'USD' else 'eth'}` first."
+        )
+    with open(path) as f:
+        raw = json.load(f)
+    return {k.lower(): int(v) for k, v in raw.items()}
+
 VALID_CHAINS = tuple(CHAINS.keys())
 
 

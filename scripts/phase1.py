@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""Script 1: Deposit MYT, create NFT positions, mint alAssets.
+"""Deposit MYT and create NFT positions (no mint — tokenIds not yet known).
 
 Usage:
     ape run phase1 --chain mainnet --asset usd
     ape run phase1 --chain mainnet --asset usd --dry-run
-    ape run phase1 --chain mainnet --asset usd --yes
 
 After this script completes:
   - All NFT positions exist on AlchemistV3, owned by the multisig.
-  - alAssets are held in the multisig (total_mint_wei).
-  - Team verifies positions match snapshot data before running phase2.
-  - Read AlchemistV3PositionNFTMinted events to map user → tokenId
-    and patch those IDs into the Script 2 transfer batches.
+  - No alAssets minted yet (minting requires real tokenIds).
+
+Next steps:
+  1. ape run read_ids --chain X --asset Y --from-block N  (read token IDs from events)
+  2. ape run mint --chain X --asset Y                     (mint alAssets using real IDs)
+  3. Team verifies positions
+  4. ape run phase2 --chain X --asset Y                   (credits + transfers + burn)
 """
 
 import click
@@ -55,11 +57,11 @@ def cli(
     yes: bool,
     dry_run: bool,
 ) -> None:
-    """Script 1: deposit MYT + create positions + mint alAssets into multisig."""
+    """Deposit MYT and create NFT positions (minting is a separate step)."""
     asset_type = AssetType.USD if asset == "usd" else AssetType.ETH
 
     click.echo("=" * 70)
-    click.echo(click.style("ALCHEMIX V3 MIGRATION — SCRIPT 1: DEPOSIT + MINT", fg="white", bold=True))
+    click.echo(click.style("ALCHEMIX V3 MIGRATION — DEPOSIT", fg="white", bold=True))
     click.echo("=" * 70)
     click.echo(f"Chain:  {click.style(chain, fg='cyan')}")
     click.echo(f"Asset:  {click.style(asset_type.value, fg='cyan')}")
@@ -98,7 +100,6 @@ def cli(
     click.echo(f"  Credit users:    {result.credit_count}")
     click.echo(f"  Zero-debt:       {result.zero_debt_count}")
     click.echo(f"  Total deposit:   {result.total_deposit_wei:,} wei")
-    click.echo(f"  Total mint:      {result.total_mint_wei:,} wei")
 
     if not result.positions:
         click.echo(click.style("No positions found.", fg="yellow"))
@@ -162,14 +163,13 @@ def cli(
             click.style("\nWARNING: ", fg="red", bold=True) +
             f"About to propose {len(plan.deposit_batches)} deposit Safe tx(s) on "
             f"{chain} ({asset_type.value}).\n"
-            f"NOTE: Token IDs in mint calls are PLACEHOLDERS (999999).\n"
-            f"      Read AlchemistV3PositionNFTMinted events after execution\n"
-            f"      and patch them into Script 2 transfer batches before signing."
+            f"NOTE: This only creates NFT positions (no minting).\n"
+            f"      After execution, run `ape run read_ids` then `ape run mint`."
         )
         if dry_run:
             click.echo(click.style("DRY RUN: skipping actual submission.", fg="yellow"))
         else:
-            if not click.confirm("Proceed with Script 1?"):
+            if not click.confirm("Proceed with deposits?"):
                 click.echo(click.style("Cancelled.", fg="yellow"))
                 raise SystemExit(0)
 
@@ -198,12 +198,11 @@ def cli(
 
     click.echo(f"\nStatus: {status}")
     click.echo(f"Proposed: {ok_count}/{len(results)} deposit batches")
-    click.echo(
-        click.style(
-            "\nNext step: verify positions on-chain, then run `ape run phase2`.",
-            fg="cyan",
-        )
-    )
+    click.echo(click.style(
+        f"\nNext: run `ape run read_ids --chain {chain} --asset {asset} --from-block <N>` "
+        f"to capture token IDs.",
+        fg="cyan",
+    ))
 
     if fail_count > 0:
         raise SystemExit(1)

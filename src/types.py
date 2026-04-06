@@ -69,21 +69,23 @@ class CSVRow:
 class PositionMigration:
     """One user's position to be migrated — per asset type.
 
-    Script 1 — deposit_batches (per user):
-      1a. deposit(deposit_amount_wei, multisig, 0)  → receives token_id from contract
-      1b. if mint_amount_wei > 0: mint(token_id, mint_amount_wei, multisig)
-          — alAssets land in multisig, user's debt is recorded on position
-          — applies to BOTH debt users (mint = their debt) AND credit users
-            (mint = their credit_amount, so multisig holds the tokens to distribute)
+    Step 1 — deposit (phase1.py):
+      deposit(deposit_amount_wei, multisig, 0)  → creates NFT, emits PositionNFTMinted
 
-    Team verifies positions match snapshot before running Script 2.
+    Step 2 — read token IDs (read_ids.py):
+      Reads PositionNFTMinted events, maps user → tokenId, writes JSON.
 
-    Script 2 — after verification:
-      2a. credit_batches: alToken.transfer(user, credit_amount_wei) for credit users
-      2b. transfer_batches: ERC721.transferFrom(multisig, user, tokenId) for all users
-      2c. final_burn_batch: alToken.burn(total_remaining) — burns leftover alAssets
-          (leftover = total_mint_wei - total_credit_wei = debt users' minted amounts)
-          Fallback: alToken.transfer(address(0), total_remaining)
+    Step 3 — mint (mint.py):
+      mint(tokenId, mint_amount_wei, multisig) using real tokenIds from the mapping.
+      Applies to BOTH debt users (mint = their debt) AND credit users
+      (mint = their credit_amount, so multisig holds tokens to distribute).
+
+    Step 4 — team verifies positions match snapshot.
+
+    Step 5 — distribute + burn (phase2.py):
+      5a. credit_batches: alToken.transfer(user, credit_amount_wei) for credit users
+      5b. transfer_batches: ERC721.transferFrom(multisig, user, tokenId)
+      5c. final_burn_batch: alToken.burn(total_remaining)
     """
 
     user_address: Address
@@ -162,13 +164,11 @@ class TransactionBatch:
 class MigrationPlan:
     """Complete migration plan for one asset type on one chain.
 
-    Script 1:
-      deposit_batches  — raise cap + deposit + mint per user
-
-    Script 2 (after team verification):
-      credit_batches   — transfer alAssets to credit users
-      transfer_batches — transfer NFTs to all users
-      final_burn_batch — burn remaining alAssets directly on alToken contract
+    Step 1 — deposit_batches:  setDepositCap + deposit (creates NFTs, no mint)
+    Step 2 — read_ids:         read AlchemistV3PositionNFTMinted events → token ID map
+    Step 3 — mint_batches:     mint(tokenId, amount, multisig) using real token IDs
+    Step 4 — team verification
+    Step 5 — credit_batches + transfer_batches + final_burn_batch
     """
 
     chain: str
@@ -176,6 +176,7 @@ class MigrationPlan:
     positions: list[PositionMigration] = field(default_factory=list)
 
     deposit_batches: list[TransactionBatch] = field(default_factory=list)
+    mint_batches: list[TransactionBatch] = field(default_factory=list)
     credit_batches: list[TransactionBatch] = field(default_factory=list)
     transfer_batches: list[TransactionBatch] = field(default_factory=list)
     final_burn_batch: "TransactionBatch | None" = None

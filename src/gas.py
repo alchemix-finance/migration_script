@@ -1,14 +1,14 @@
 """Gas estimation and transaction batching for V3 migration.
 
-Batching strategy for deposit phase:
-  Each batch starts with setDepositCap(currentCap + batchDepositSum), then
-  interleaves deposit + mint per user. This keeps each position's deposit
-  and mint in the same batch (same Safe tx), which simplifies on-chain ordering.
-
-  Rationale for deposit+mint together (vs all-deposits-then-all-mints):
-  - mint() requires the caller to own the NFT, which deposit() just created
-  - Separating them would require tracking token IDs across batch boundaries
-  - Keeping them together means each batch is self-contained and independently safe
+Batching strategy:
+  Deposits and mints are in SEPARATE batches because mint(tokenId, ...) needs
+  the real tokenId assigned by the contract at deposit time. Flow:
+    1. deposit_batches  — setDepositCap + deposit per user (creates NFTs)
+    2. read_ids         — read events to get user→tokenId mapping
+    3. mint_batches     — mint(tokenId, amount, multisig) using real IDs
+    4. credit_batches   — alToken.transfer to credit users
+    5. transfer_batches — NFT transferFrom using real IDs
+    6. final_burn_batch — alToken.burn(remaining)
 
 Gas limit: 16M. Target: 90% = 14.4M per batch (10% headroom).
 """
@@ -42,39 +42,27 @@ def _gas_mint(p: PositionMigration) -> int:
 
 
 def gas_per_position_in_deposit_batch(p: PositionMigration) -> int:
-    """Gas for one user's slice of a deposit batch: deposit [+ mint]."""
-    gas = _gas_deposit(p)
-    if p.is_debt_user:
-        gas += _gas_mint(p)
-    return gas
+    """Gas for one user's deposit call (no mint — mints are separate)."""
+    return _gas_deposit(p)
 
 
 def create_deposit_batches(
     positions: list[PositionMigration],
     alchemist_address: str,
-    al_token_address: str,
     multisig: str,
     current_deposit_cap_wei: int = 0,
     gas_limit: int = EFFECTIVE_GAS_LIMIT,
 ) -> list[TransactionBatch]:
-    """Create deposit batches: [setDepositCap, deposit, mint?, deposit, mint?, ...]
+    """Create deposit-only batches: [setDepositCap, deposit, deposit, ...]
 
     Each batch:
       1. setDepositCap(currentCap + sum_of_this_batch_deposits)
-      2. For each user in batch: deposit() then mint() if debt > 0
+      2. For each user: deposit(amount, multisig, 0) → creates NFT
 
-    Token IDs are not known at batching time (they're emitted on-chain).
-    The mint() calls use placeholder token_id=0 — the actual IDs must be
-    filled in just before execution by reading the deposit event logs.
-
-    We use a sentinel token_id=999999 as placeholder so the calldata is
-    structurally complete but needs patching before submission.
+    Mints are NOT included — they require real tokenIds from deposit events.
+    Run `ape run read_ids` after these execute, then `ape run mint`.
     """
-    from src.transactions import (
-        build_deposit_tx,
-        build_mint_tx,
-        build_set_deposit_cap_tx,
-    )
+    from src.transactions import build_deposit_tx, build_set_deposit_cap_tx
 
     if not positions:
         return []
@@ -84,10 +72,9 @@ def create_deposit_batches(
     current_cap = current_deposit_cap_wei
     batch_deposit_sum = 0
 
-    # Reserve gas for the setDepositCap call that begins each batch
     current_batch.add_call(
         TransactionCall(
-            to="",  # placeholder — filled in below
+            to="",  # placeholder — replaced in _finalize_batch
             data=b"",
             gas_estimate=GAS_SET_DEPOSIT_CAP,
             description="setDepositCap(TBD)",
@@ -95,7 +82,6 @@ def create_deposit_batches(
     )
 
     def _finalize_batch(batch: TransactionBatch, cap_sum: int, cap_base: int) -> TransactionBatch:
-        """Replace the placeholder cap call with a real one."""
         new_cap = cap_base + cap_sum
         cap_tx = build_set_deposit_cap_tx(alchemist_address, new_cap)
         batch.calls[0] = cap_tx
@@ -105,38 +91,69 @@ def create_deposit_batches(
     def _start_new_batch(n: int, cap_base: int) -> tuple[TransactionBatch, int]:
         b = TransactionBatch(batch_number=n, batch_type="deposit")
         b.add_call(
-            TransactionCall(
-                to="",
-                data=b"",
-                gas_estimate=GAS_SET_DEPOSIT_CAP,
-                description="setDepositCap(TBD)",
-            )
+            TransactionCall(to="", data=b"", gas_estimate=GAS_SET_DEPOSIT_CAP,
+                            description="setDepositCap(TBD)")
         )
         return b, 0
 
     for position in positions:
         pos_gas = gas_per_position_in_deposit_batch(position)
 
-        # Would this position overflow the current batch?
         if current_batch.total_gas + pos_gas > gas_limit and len(current_batch.calls) > 1:
             batches.append(_finalize_batch(current_batch, batch_deposit_sum, current_cap))
             current_cap += batch_deposit_sum
             current_batch, batch_deposit_sum = _start_new_batch(len(batches) + 1, current_cap)
 
-        # Add deposit
         dep_tx = build_deposit_tx(position, alchemist_address, multisig)
         current_batch.add_call(dep_tx)
         batch_deposit_sum += position.deposit_amount_wei
 
-        # Add mint if debt user (token_id placeholder — must be patched before submission)
-        if position.is_debt_user:
-            PLACEHOLDER_TOKEN_ID = 999_999
-            mint_tx = build_mint_tx(position, alchemist_address, multisig, PLACEHOLDER_TOKEN_ID)
-            current_batch.add_call(mint_tx)
-
-    # Flush last batch
     if len(current_batch.calls) > 1:
         batches.append(_finalize_batch(current_batch, batch_deposit_sum, current_cap))
+
+    return batches
+
+
+def create_mint_batches(
+    positions: list[PositionMigration],
+    alchemist_address: str,
+    multisig: str,
+    token_id_map: dict[str, int],
+    gas_limit: int = EFFECTIVE_GAS_LIMIT,
+) -> list[TransactionBatch]:
+    """Create mint batches using real token IDs from the event mapping.
+
+    mint(tokenId, mint_amount_wei, multisig) for each position with mint_amount_wei > 0.
+    Requires token_id_map from `ape run read_ids`.
+    """
+    from src.transactions import build_mint_tx
+
+    mintable = [p for p in positions if p.mint_amount_wei > 0]
+    if not mintable:
+        return []
+
+    batches: list[TransactionBatch] = []
+    current_batch = TransactionBatch(batch_number=1, batch_type="mint")
+
+    for position in mintable:
+        addr = position.user_address.lower()
+        if addr not in token_id_map:
+            raise ValueError(
+                f"No token ID found for {position.user_address}. "
+                f"Run `ape run read_ids` first."
+            )
+        token_id = token_id_map[addr]
+
+        mint_tx = build_mint_tx(position, alchemist_address, multisig, token_id)
+
+        if current_batch.total_gas + mint_tx.gas_estimate > gas_limit and current_batch.calls:
+            batches.append(current_batch)
+            current_batch = TransactionBatch(batch_number=len(batches) + 1, batch_type="mint")
+
+        current_batch.add_call(mint_tx)
+
+    if current_batch.calls:
+        batches.append(current_batch)
 
     return batches
 
@@ -214,29 +231,36 @@ def create_transfer_batches(
     positions: list[PositionMigration],
     nft_address: str,
     multisig: str,
+    token_id_map: dict[str, int] | None = None,
     gas_limit: int = EFFECTIVE_GAS_LIMIT,
 ) -> list[TransactionBatch]:
     """Create NFT transfer batches: transferFrom(multisig, user, tokenId) per user.
 
-    Token IDs are placeholders (999999) — must be patched before submission.
-    Executed last, after team verification.
+    Uses real token IDs from token_id_map if provided, otherwise placeholder 999999.
     """
     from src.transactions import build_nft_transfer_tx
 
     if not positions:
         return []
 
+    PLACEHOLDER_TOKEN_ID = 999_999
     batches: list[TransactionBatch] = []
     current_batch = TransactionBatch(batch_number=1, batch_type="transfer")
 
-    PLACEHOLDER_TOKEN_ID = 999_999
-
     for position in positions:
+        if token_id_map is not None:
+            addr = position.user_address.lower()
+            if addr not in token_id_map:
+                raise ValueError(f"No token ID found for {position.user_address}")
+            token_id = token_id_map[addr]
+        else:
+            token_id = PLACEHOLDER_TOKEN_ID
+
         tx = build_nft_transfer_tx(
             nft_address=nft_address,
             multisig=multisig,
             user_address=position.user_address,
-            token_id=PLACEHOLDER_TOKEN_ID,
+            token_id=token_id,
         )
 
         if current_batch.total_gas + tx.gas_estimate > gas_limit and current_batch.calls:
@@ -261,22 +285,18 @@ def build_migration_plan(
     current_deposit_cap_wei: int = 0,
     gas_limit: int = EFFECTIVE_GAS_LIMIT,
     use_burn_fallback: bool = False,
+    token_id_map: dict[str, int] | None = None,
 ) -> "MigrationPlan":
-    """Build the two-script migration plan for one asset type on one chain.
+    """Build the full migration plan for one asset type on one chain.
 
-    Script 1 — deposit_batches:
-      [setDepositCap, deposit, mint?] per user.
-      All users with mint_amount_wei > 0 (debt AND credit) get minted in Script 1.
-      alAssets land in the multisig. Team verifies before running Script 2.
+    Deposit batches (phase1): deposit only — no mint (tokenIds not yet known).
+    Mint batches (mint script): mint using real tokenIds from read_ids.
+    Credit batches (phase2): alToken.transfer to credit users.
+    Transfer batches (phase2): NFT transferFrom using real tokenIds.
+    Final burn (phase2): alToken.burn(remaining).
 
-    Script 2 — after verification:
-      credit_batches   — alToken.transfer(user, credit_amount_wei) for credit users
-      transfer_batches — ERC721.transferFrom(multisig, user, tokenId) for all users
-      final_burn_batch — alToken.burn(remaining) OR transfer(0x000, remaining)
-                         remaining = total_mint_wei - total_credit_wei
-                         (= debt users' minted amounts; credit users keep theirs)
-
-    use_burn_fallback: if True, final_burn_batch uses transfer(0x000...) instead of burn().
+    token_id_map: if provided, builds mint and transfer batches with real IDs.
+                  If None, mint_batches are empty and transfers use placeholder 999999.
     """
     from src.types import AssetType, MigrationPlan
 
@@ -285,16 +305,21 @@ def build_migration_plan(
     plan = MigrationPlan(chain=chain, asset_type=asset_type, positions=positions)
 
     plan.deposit_batches = create_deposit_batches(
-        positions, alchemist_address, al_token_address, multisig,
+        positions, alchemist_address, multisig,
         current_deposit_cap_wei, gas_limit,
     )
+
+    if token_id_map:
+        plan.mint_batches = create_mint_batches(
+            positions, alchemist_address, multisig, token_id_map, gas_limit,
+        )
 
     plan.credit_batches = create_credit_batches(
         plan.credit_users, al_token_address, gas_limit,
     )
 
     plan.transfer_batches = create_transfer_batches(
-        positions, nft_address, multisig, gas_limit,
+        positions, nft_address, multisig, token_id_map, gas_limit,
     )
 
     remaining_wei = plan.total_mint_wei - plan.total_credit_wei
