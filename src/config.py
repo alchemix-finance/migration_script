@@ -61,7 +61,7 @@ CHAINS: dict[str, ChainConfig] = {
             "al_token": "",
             "underlying": "",
             "nft": "",          # AlchemistV3Position address — fill in after deployment
-            "myt_decimals": 6,  # USDCMYT vault uses 6 decimals (same as USDC underlying)
+            "myt_decimals": 18, # USDCMYT vault uses 18 decimals (standard ERC-4626)
         },
         "eth": {
             "alchemist": "",
@@ -81,7 +81,7 @@ CHAINS: dict[str, ChainConfig] = {
             "al_token": "",
             "underlying": "",
             "nft": "",          # AlchemistV3Position address — fill in after deployment
-            "myt_decimals": 6,  # USDCMYT vault uses 6 decimals (same as USDC underlying)
+            "myt_decimals": 18, # USDCMYT vault uses 18 decimals (standard ERC-4626)
         },
         "eth": {
             "alchemist": "",
@@ -101,7 +101,7 @@ CHAINS: dict[str, ChainConfig] = {
             "al_token": "",
             "underlying": "",
             "nft": "",          # AlchemistV3Position address — fill in after deployment
-            "myt_decimals": 6,  # USDCMYT vault uses 6 decimals (same as USDC underlying)
+            "myt_decimals": 18, # USDCMYT vault uses 18 decimals (standard ERC-4626)
         },
         "eth": {
             "alchemist": "",
