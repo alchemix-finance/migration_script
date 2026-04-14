@@ -1,3 +1,4 @@
+import src.env  # Load .env on startup
 #!/usr/bin/env python3
 """Step 4: Transfer NFTs from multisig to users.
 

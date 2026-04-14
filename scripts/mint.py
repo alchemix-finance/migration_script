@@ -1,3 +1,4 @@
+import src.env  # Load .env on startup
 #!/usr/bin/env python3
 """Step 2: Mint alAssets against NFT positions using real token IDs.
 

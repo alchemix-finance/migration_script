@@ -29,6 +29,10 @@ from eth_utils import keccak
 
 from src.types import TransactionBatch, TransactionCall
 
+# Lazy imports for signing — only needed when proposing to real Safe API
+# eth_account.Account.signHash for EIP-712 signatures
+# src.env for proposer credentials
+
 
 class SafeOperationType(IntEnum):
     """Safe operation types for transactions."""
@@ -324,19 +328,35 @@ class ProposeToSafe:
         chain_id: int = 1,
         signer_address: str | None = None,
         api_url: str | None = None,
+        signer_pk: str | None = None,
     ):
         """Initialize the Safe proposer.
 
         Args:
             safe_address: The Safe multisig address
             chain_id: Chain ID for the network
-            signer_address: Address of the proposer (must be a Safe owner)
+            signer_address: Address of the proposer (must be a Safe owner).
+                If not provided, loaded from PROPOSER_ADDRESS env var.
             api_url: Optional override for Safe Transaction Service URL
+            signer_pk: Hex-encoded private key for signing proposals.
+                If not provided, loaded from PROPOSER_PRIVATE_KEY env var.
         """
         self.safe_address = safe_address
         self.chain_id = chain_id
-        self.signer_address = signer_address
         self._next_nonce: int | None = None
+
+        # Resolve signer credentials from env if not passed explicitly
+        from src.env import get_proposer_address, get_proposer_private_key
+
+        try:
+            self.signer_pk = signer_pk or get_proposer_private_key()
+        except EnvironmentError:
+            self.signer_pk = None
+
+        try:
+            self.signer_address = signer_address or get_proposer_address()
+        except EnvironmentError:
+            self.signer_address = None
 
         if api_url:
             self.api_url = api_url
@@ -399,19 +419,72 @@ class ProposeToSafe:
 
         tx_data = serialize_for_safe_api(safe_tx)
 
-        # STUB: Replace this block with actual HTTP POST to Safe API
-        # POST {api_url}/api/v1/safes/{safe_address}/multisig-transactions/
-        # Body: tx_data + signature from sender
-        return {
-            "status": "stubbed",
-            "message": "Transaction proposal prepared but not submitted (HTTP POST not yet implemented)",
-            "safe_address": self.safe_address,
-            "chain_id": self.chain_id,
+        # Compute the Safe tx hash and sign it with the proposer's private key
+        tx_hash = compute_safe_tx_hash(
+            self.safe_address, safe_tx, self.chain_id
+        )
+
+        if self.signer_pk:
+            from eth_account import Account
+            signature = Account.signHash(tx_hash, f"0x{self.signer_pk}")
+            sig_hex = signature.signature.hex()
+        else:
+            # Dry-run / no-key mode: propose without signature (will need manual signing in Safe UI)
+            sig_hex = ""
+
+        # POST to Safe Transaction Service API
+        payload = {
+            **tx_data,
+            "signature": f"0x{sig_hex}" if sig_hex else "",
             "sender": sender,
-            "nonce": safe_tx.nonce,
-            "transaction_data": tx_data,
-            "api_url": f"{self.api_url}/api/v1/safes/{self.safe_address}/multisig-transactions/",
         }
+
+        api_endpoint = f"{self.api_url}/api/v1/safes/{self.safe_address}/multisig-transactions/"
+
+        if not self.signer_pk:
+            return {
+                "status": "stubbed",
+                "message": "No proposer key configured — transaction prepared but not submitted",
+                "safe_address": self.safe_address,
+                "chain_id": self.chain_id,
+                "sender": sender,
+                "nonce": safe_tx.nonce,
+                "safe_tx_hash": f"0x{tx_hash.hex()}",
+                "transaction_data": tx_data,
+                "api_url": api_endpoint,
+            }
+
+        req = urllib.request.Request(
+            api_endpoint,
+            data=json_lib.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                resp_body = json_lib.loads(response.read().decode())
+                return {
+                    "status": "success",
+                    "safe_address": self.safe_address,
+                    "chain_id": self.chain_id,
+                    "sender": sender,
+                    "nonce": safe_tx.nonce,
+                    "safe_tx_hash": f"0x{tx_hash.hex()}",
+                    "api_response": resp_body,
+                    "api_url": api_endpoint,
+                }
+        except urllib.error.HTTPError as e:
+            body = e.read().decode() if e.fp else ""
+            return {
+                "status": "error",
+                "message": f"Safe API returned {e.code}: {body}",
+                "safe_address": self.safe_address,
+                "chain_id": self.chain_id,
+                "sender": sender,
+                "nonce": safe_tx.nonce,
+                "safe_tx_hash": f"0x{tx_hash.hex()}",
+                "api_url": api_endpoint,
+            }
 
     def propose_all_batches(
         self,

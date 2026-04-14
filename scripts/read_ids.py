@@ -1,3 +1,4 @@
+import src.env  # Load .env on startup
 #!/usr/bin/env python3
 """Read token IDs from deposit events and map them to CSV positions.
 

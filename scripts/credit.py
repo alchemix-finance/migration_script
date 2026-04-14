@@ -1,3 +1,4 @@
+import src.env  # Load .env on startup
 #!/usr/bin/env python3
 """Step 5: Send alAsset credits to credit users.
 
