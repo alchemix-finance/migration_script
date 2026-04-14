@@ -146,19 +146,41 @@ def cli(
     click.echo(click.style("\n[3/4] Batch summary...", fg="cyan", bold=True))
     click.echo(format_batch_summary(batches, chain=chain))
 
+    n_plan = len(batches)
+    if n_plan > 1:
+        click.echo(
+            click.style(
+                "\nThe summary above is the full migration plan. "
+                "Only ONE batch is proposed to the Safe at a time.",
+                fg="cyan",
+            )
+        )
+        if not yes:
+            click.echo(
+                click.style(
+                    f"Next step (if you confirm below): propose batch 1/{n_plan} only — "
+                    f"not all {n_plan} batches.",
+                    fg="cyan",
+                )
+            )
+
     # Confirm + Execute
     click.echo(click.style("\n[4/4] Confirmation...", fg="cyan", bold=True))
     if not yes:
         click.echo(
             click.style("\nWARNING: ", fg="red", bold=True) +
-            f"About to propose deposit Safe txs on {chain} ({asset_type.value}) "
-            f"({len(batches)} batch(es)).\n"
-            f"The first batch is proposed, then you confirm each following batch after reviewing the Safe queue.\n"
+            f"Deposit proposals on {chain} ({asset_type.value}). "
+            f"{n_plan} Safe transaction(s) total, submitted one-by-one with a pause between each "
+            f"(unless you used -y).\n"
             f"NOTE: This only creates NFT positions (no minting)."
         )
         if dry_run:
             click.echo(click.style("DRY RUN: skipping actual submission.", fg="yellow"))
-        elif not click.confirm("Proceed with deposits?"):
+        elif not click.confirm(
+            f"Propose batch 1/{n_plan} to the Safe queue now?"
+            if n_plan > 1
+            else "Propose this deposit batch to the Safe queue now?"
+        ):
             click.echo(click.style("Cancelled.", fg="yellow"))
             raise SystemExit(0)
 

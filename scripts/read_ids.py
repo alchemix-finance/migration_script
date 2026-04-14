@@ -17,13 +17,14 @@ This file is consumed by `ape run mint` and `ape run distribute`.
 """
 
 import json
+import os
 
 import click
-from ape import chain
-from ape.cli import ape_cli_context
 from eth_utils import keccak
+from web3 import Web3
 
 from src.config import (
+    CHAINS,
     get_asset_config,
     get_chain_config,
     get_csv_path,
@@ -43,8 +44,7 @@ ZERO_ADDRESS_TOPIC = "0x" + "0" * 64
 @click.option("--asset", type=click.Choice(["usd", "eth"]), required=True)
 @click.option("--from-block", type=int, required=True, help="Block number where deposit script started.")
 @click.option("--to-block", type=int, default=None, help="End block (default: latest).")
-@ape_cli_context()
-def cli(cli_ctx, chain_name: str, asset: str, from_block: int, to_block: int | None) -> None:
+def cli(chain_name: str, asset: str, from_block: int, to_block: int | None) -> None:
     """Read NFT mint events and map token IDs to CSV positions."""
     asset_type = AssetType.USD if asset == "usd" else AssetType.ETH
 
@@ -75,20 +75,91 @@ def cli(cli_ctx, chain_name: str, asset: str, from_block: int, to_block: int | N
     click.echo(f"Loaded {len(positions)} positions from CSV")
     click.echo(f"Querying NFT events on {nft_address} from block {from_block}...")
 
-    # Query ERC721 Transfer(from=0x0, to=multisig) events — these are the NFT mints
-    w3 = chain.provider.web3
-    log_filter = {
-        "address": w3.to_checksum_address(nft_address),
-        "fromBlock": from_block,
-        "toBlock": to_block or "latest",
-        "topics": [
-            TRANSFER_EVENT_TOPIC,   # Transfer event
-            ZERO_ADDRESS_TOPIC,     # from = address(0) (mint)
-            multisig_topic,         # to = multisig
-        ],
+    # Connect to RPC directly (avoids needing ape provider setup)
+    alchemy_key = os.environ.get("ALCHEMY_API_KEY", "").strip()
+    chain_id = CHAINS[chain_name]["chain_id"]
+    rpc_urls = {
+        1: f"https://eth-mainnet.g.alchemy.com/v2/{alchemy_key}",
+        10: f"https://opt-mainnet.g.alchemy.com/v2/{alchemy_key}",
+        42161: f"https://arb-mainnet.g.alchemy.com/v2/{alchemy_key}",
     }
+    rpc_url = os.environ.get(
+        {1: "MAINNET_RPC_URL", 10: "OPTIMISM_RPC_URL", 42161: "ARBITRUM_RPC_URL"}.get(chain_id, ""),
+        "",
+    ) or rpc_urls.get(chain_id, "")
 
-    logs = w3.eth.get_logs(log_filter)
+    if not rpc_url or not alchemy_key:
+        click.echo(click.style("Error: ALCHEMY_API_KEY not set in .env", fg="red"))
+        raise SystemExit(1)
+
+    w3 = Web3(Web3.HTTPProvider(rpc_url))
+    if not w3.is_connected():
+        click.echo(click.style("Error: could not connect to RPC", fg="red"))
+        raise SystemExit(1)
+
+    end_block = to_block or w3.eth.block_number
+    click.echo(f"Block range: {from_block} → {end_block}")
+
+    topics = [
+        TRANSFER_EVENT_TOPIC,   # Transfer event
+        ZERO_ADDRESS_TOPIC,     # from = address(0) (mint)
+        multisig_topic,         # to = multisig
+    ]
+
+    # Use Alchemy's getAssetTransfers API to fetch all NFT mints in bulk
+    # (avoids eth_getLogs block range limits on free tier)
+    all_logs = []
+    page_key = None
+
+    while True:
+        payload_body = {
+            "fromBlock": hex(from_block),
+            "toBlock": hex(end_block),
+            "fromAddress": "0x0000000000000000000000000000000000000000",
+            "toAddress": multisig,
+            "contractAddresses": [nft_address],
+            "category": ["erc721"],
+            "withMetadata": False,
+            "excludeZeroValue": False,
+            "maxCount": "0x3e8",  # 1000 per page
+        }
+        if page_key:
+            payload_body["pageKey"] = page_key
+
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "alchemy_getAssetTransfers",
+            "params": [payload_body],
+            "id": 1,
+        }
+
+        import ssl
+        import certifi
+        import urllib.request
+
+        ctx = ssl.create_default_context(cafile=certifi.where())
+        req = urllib.request.Request(
+            rpc_url,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, timeout=30, context=ctx)
+        result = json.loads(resp.read().decode())
+
+        if "error" in result:
+            click.echo(click.style(f"Alchemy API error: {result['error']}", fg="red"))
+            raise SystemExit(1)
+
+        transfers = result.get("result", {}).get("transfers", [])
+        all_logs.extend(transfers)
+        click.echo(f"  Fetched {len(transfers)} transfers (total: {len(all_logs)})")
+
+        page_key = result.get("result", {}).get("pageKey")
+        if not page_key:
+            break
+
+    logs = all_logs
     click.echo(f"Found {len(logs)} NFT mint events")
 
     if len(logs) != len(positions):
@@ -105,8 +176,10 @@ def cli(cli_ctx, chain_name: str, asset: str, from_block: int, to_block: int | N
     # Extract token IDs from event logs (topics[3] = indexed tokenId)
     # Events are ordered by (blockNumber, logIndex), matching CSV/deposit order.
     token_id_map: dict[str, int] = {}
-    for i, (log, position) in enumerate(zip(logs, positions)):
-        token_id = int(log["topics"][3].hex(), 16)
+    for i, (transfer, position) in enumerate(zip(logs, positions)):
+        # alchemy_getAssetTransfers returns tokenId as a hex string or decimal
+        raw_token_id = transfer.get("tokenId", transfer.get("erc721TokenId", "0x0"))
+        token_id = int(raw_token_id, 16) if isinstance(raw_token_id, str) and raw_token_id.startswith("0x") else int(raw_token_id)
         addr = position.user_address.lower()
         token_id_map[addr] = token_id
 

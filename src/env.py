@@ -69,3 +69,37 @@ def get_safe_api_url(chain: str) -> str | None:
     """Get custom Safe Transaction Service URL for a chain, if configured."""
     key = f"SAFE_API_URL_{chain.upper()}"
     return os.environ.get(key, "").strip() or None
+
+
+def get_safe_api_timeout_seconds() -> float:
+    """HTTP timeout (seconds) for Safe Transaction Service requests (GET nonce, POST proposal)."""
+    raw = os.environ.get("SAFE_API_TIMEOUT", "").strip()
+    if not raw:
+        return 90.0
+    try:
+        t = float(raw)
+    except ValueError as e:
+        raise EnvironmentError(
+            f"SAFE_API_TIMEOUT must be a number (got {raw!r})."
+        ) from e
+    return max(5.0, t)
+
+
+def get_safe_proposal_start_nonce() -> int | None:
+    """Next Safe tx nonce to use when proposing (must match Safe Transaction Service).
+
+    If set, the Safe API is not queried for nonce (useful when SSL or timeouts block the API).
+    Use the same value the Safe UI shows for the next transaction.
+    """
+    raw = os.environ.get("SAFE_PROPOSAL_START_NONCE", "").strip()
+    if not raw:
+        return None
+    try:
+        n = int(raw, 10)
+    except ValueError as e:
+        raise EnvironmentError(
+            f"SAFE_PROPOSAL_START_NONCE must be a non-negative integer (got {raw!r})."
+        ) from e
+    if n < 0:
+        raise EnvironmentError("SAFE_PROPOSAL_START_NONCE must be >= 0.")
+    return n

@@ -18,6 +18,7 @@ operation (1 byte) + to (20 bytes) + value (32 bytes) + data_length (32 bytes) +
 """
 
 import json as json_lib
+import ssl
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -30,8 +31,22 @@ from eth_utils import keccak
 from src.types import TransactionBatch, TransactionCall
 
 # Lazy imports for signing — only needed when proposing to real Safe API
-# eth_account.Account.signHash for EIP-712 signatures
-# src.env for proposer credentials
+
+
+def _safe_api_timeout() -> float:
+    from src.env import get_safe_api_timeout_seconds
+
+    return get_safe_api_timeout_seconds()
+
+
+def _ssl_context_for_https() -> ssl.SSLContext:
+    """TLS context that uses certifi CA bundle when available (fixes macOS Python verify failures)."""
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
 
 
 class SafeOperationType(IntEnum):
@@ -275,12 +290,6 @@ def serialize_for_safe_api(safe_tx: SafeTransaction) -> dict[str, Any]:
         "gasToken": safe_tx.gas_token,
         "refundReceiver": safe_tx.refund_receiver,
         "nonce": safe_tx.nonce,
-        # Additional metadata for display
-        "_meta": {
-            "descriptions": safe_tx.descriptions,
-            "transactionCount": safe_tx.transaction_count,
-            "isMultiSend": safe_tx.is_multisend,
-        },
     }
 
 
@@ -319,7 +328,7 @@ class ProposeToSafe:
     SAFE_TX_SERVICE_URLS: dict[int, str] = {
         1: "https://safe-transaction-mainnet.safe.global",
         10: "https://safe-transaction-optimism.safe.global",
-        42161: "https://safe-transaction-arbitrum.safe.global",
+        42161: "https://api.safe.global/tx-service/arb1",
     }
 
     def __init__(
@@ -358,6 +367,11 @@ class ProposeToSafe:
         except EnvironmentError:
             self.signer_address = None
 
+        if self.signer_pk and not self.signer_address:
+            from eth_account import Account
+
+            self.signer_address = Account.from_key(f"0x{self.signer_pk}").address
+
         if api_url:
             self.api_url = api_url
         else:
@@ -366,6 +380,25 @@ class ProposeToSafe:
                 raise ValueError(
                     f"No Safe Transaction Service URL known for chain {chain_id}"
                 )
+
+    def _resolve_initial_nonce(self) -> None:
+        """Set _next_nonce from env override or Safe Transaction Service."""
+        if self._next_nonce is not None:
+            return
+        from src.env import get_safe_proposal_start_nonce
+
+        override = get_safe_proposal_start_nonce()
+        if override is not None:
+            self._next_nonce = override
+            return
+        try:
+            self._next_nonce = self.get_next_nonce()
+        except ValueError as e:
+            raise ValueError(
+                "Could not fetch Safe nonce from the Transaction Service API. "
+                "Fix TLS (e.g. `pip install certifi`), increase SAFE_API_TIMEOUT, "
+                "or set SAFE_PROPOSAL_START_NONCE in .env to the next nonce from the Safe app."
+            ) from e
 
     def get_next_nonce(self) -> int:
         """Fetch the next available nonce from the Safe Transaction Service.
@@ -377,10 +410,18 @@ class ProposeToSafe:
             ValueError: If the API call fails
         """
         url = f"{self.api_url}/api/v1/safes/{self.safe_address}/"
+        timeout = _safe_api_timeout()
         try:
-            with urllib.request.urlopen(url, timeout=10) as response:
+            ctx = _ssl_context_for_https()
+            with urllib.request.urlopen(url, timeout=timeout, context=ctx) as response:
                 data = json_lib.loads(response.read().decode())
                 return int(data["nonce"])
+        except TimeoutError as e:
+            raise ValueError(
+                f"Safe API timed out ({timeout:.0f}s) fetching nonce from {url}. "
+                "Set SAFE_PROPOSAL_START_NONCE in .env to skip this request, or set SAFE_API_TIMEOUT "
+                "to a larger value (seconds)."
+            ) from e
         except urllib.error.URLError as e:
             raise ValueError(f"Failed to fetch Safe nonce from {url}: {e}")
         except (KeyError, ValueError) as e:
@@ -408,11 +449,12 @@ class ProposeToSafe:
         """
         sender = sender or self.signer_address
         if not sender:
-            raise ValueError("Sender address required for proposal")
+            raise ValueError(
+                "Sender address required for proposal. Set PROPOSER_ADDRESS in .env "
+                "or PROPOSER_PRIVATE_KEY (address is derived from the key)."
+            )
 
-        # Fetch nonce on first call, then increment locally
-        if self._next_nonce is None:
-            self._next_nonce = self.get_next_nonce()
+        self._resolve_initial_nonce()
 
         safe_tx.nonce = self._next_nonce
         self._next_nonce += 1
@@ -426,8 +468,11 @@ class ProposeToSafe:
 
         if self.signer_pk:
             from eth_account import Account
-            signature = Account.signHash(tx_hash, f"0x{self.signer_pk}")
-            sig_hex = signature.signature.hex()
+
+            # eth-account >=0.13 removed Account.signHash; unsafe_sign_hash matches the old ECDSA-on-digest behavior.
+            proposer = Account.from_key(f"0x{self.signer_pk}")
+            signed = proposer.unsafe_sign_hash(tx_hash)
+            sig_hex = signed.signature.hex()
         else:
             # Dry-run / no-key mode: propose without signature (will need manual signing in Safe UI)
             sig_hex = ""
@@ -435,6 +480,7 @@ class ProposeToSafe:
         # POST to Safe Transaction Service API
         payload = {
             **tx_data,
+            "contractTransactionHash": f"0x{tx_hash.hex()}",
             "signature": f"0x{sig_hex}" if sig_hex else "",
             "sender": sender,
         }
@@ -460,9 +506,12 @@ class ProposeToSafe:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        timeout = _safe_api_timeout()
         try:
-            with urllib.request.urlopen(req, timeout=30) as response:
-                resp_body = json_lib.loads(response.read().decode())
+            ctx = _ssl_context_for_https()
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as response:
+                raw_body = response.read().decode()
+                resp_body = json_lib.loads(raw_body) if raw_body.strip() else {}
                 return {
                     "status": "success",
                     "safe_address": self.safe_address,
@@ -473,6 +522,20 @@ class ProposeToSafe:
                     "api_response": resp_body,
                     "api_url": api_endpoint,
                 }
+        except TimeoutError as e:
+            return {
+                "status": "error",
+                "message": (
+                    f"Safe API timed out ({timeout:.0f}s) posting proposal. "
+                    f"Retry or increase SAFE_API_TIMEOUT. ({e})"
+                ),
+                "safe_address": self.safe_address,
+                "chain_id": self.chain_id,
+                "sender": sender,
+                "nonce": safe_tx.nonce,
+                "safe_tx_hash": f"0x{tx_hash.hex()}",
+                "api_url": api_endpoint,
+            }
         except urllib.error.HTTPError as e:
             body = e.read().decode() if e.fp else ""
             return {
@@ -500,20 +563,8 @@ class ProposeToSafe:
         Returns:
             List of proposal results
         """
-        # Pre-fetch nonce so a single failure is caught before any proposals are made.
-        # If the Safe is not yet deployed or the chain is wrong, fall back to nonce 0
-        # with a warning so callers can still inspect prepared transaction data.
-        if self._next_nonce is None:
-            try:
-                self._next_nonce = self.get_next_nonce()
-            except ValueError as e:
-                import warnings
-                warnings.warn(
-                    f"Could not fetch Safe nonce ({e}); defaulting to nonce 0. "
-                    "Proposals may be rejected if the Safe already has pending transactions.",
-                    stacklevel=2,
-                )
-                self._next_nonce = 0
+        # Resolve nonce once before proposing so API/env errors fail fast.
+        self._resolve_initial_nonce()
 
         results = []
         for safe_tx in safe_txs:

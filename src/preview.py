@@ -4,9 +4,9 @@ from decimal import Decimal
 
 import click
 
-from src.config import get_effective_gas_limit
+from src.config import AssetConfig, ChainConfig, get_effective_gas_limit
 from src.gas import calculate_batch_statistics
-from src.types import AssetConfig, ChainConfig, MigrationPlan, TransactionBatch
+from src.types import MigrationPlan, TransactionBatch
 
 LINE = "=" * 70
 SUB = "-" * 70
