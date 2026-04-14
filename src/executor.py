@@ -158,7 +158,9 @@ class ForkImpersonator:
 
         multisig = Web3.to_checksum_address(self.safe_address)
         rpc_url = os.environ.get("FORK_RPC_URL", "http://localhost:8545")
-        w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 120}))
+        receipt_timeout = float(os.environ.get("FORK_RECEIPT_TIMEOUT", "300"))
+        http_timeout = float(os.environ.get("FORK_HTTP_TIMEOUT", "120"))
+        w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": http_timeout}))
 
         if not w3.is_connected():
             raise RuntimeError(
@@ -176,22 +178,31 @@ class ForkImpersonator:
         end = min(start + consume_count, len(self.batches))
         self._cursor = end
 
+        # Fork-throughput tuning:
+        # - Skip per-call eth_estimateGas; use a high static gas cap (anvil
+        #   discards unused gas, so overbudgeting is free). This removes one
+        #   RPC round-trip per call.
+        # - Poll receipts at 10 ms intervals since anvil auto-mines. Default
+        #   web3.py poll_latency is 0.5 s, which is the dominant cost when the
+        #   underlying tx is effectively instant.
+        fork_gas = int(os.environ.get("FORK_GAS_PER_CALL", str(5_000_000)))
+        poll_latency = float(os.environ.get("FORK_POLL_LATENCY", "0.01"))
+
         results: list[dict[str, Any]] = []
         for batch in self.batches[start:end]:
             tx_hashes: list[str] = []
             for call in batch.calls:
-                # Fork runs don't need tight gas budgets — give plenty of
-                # headroom so downstream view calls (e.g. Aave realAssets) that
-                # the migration transactions trigger don't OOM.
                 tx = {
                     "from": multisig,
                     "to": Web3.to_checksum_address(call.to),
                     "data": "0x" + call.data.hex() if call.data else "0x",
                     "value": hex(call.value),
-                    "gas": hex(max(call.gas_estimate * 10, 2_000_000)),
+                    "gas": hex(fork_gas),
                 }
                 tx_hash = w3.eth.send_transaction(tx)
-                receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+                receipt = w3.eth.wait_for_transaction_receipt(
+                    tx_hash, timeout=receipt_timeout, poll_latency=poll_latency,
+                )
                 if receipt.status != 1:
                     raise RuntimeError(
                         f"Impersonated tx reverted: batch {batch.batch_number} "

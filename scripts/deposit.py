@@ -121,6 +121,16 @@ def cli(
 
     alchemist = asset_config.get("alchemist", "") or "0x" + "0" * 40
 
+    # Read on-chain depositCap so we don't emit a setDepositCap that would
+    # lower it (V3 alchemist reverts on downward changes).
+    live_cap = 0
+    try:
+        from src.preflight import read_deposit_cap
+        live_cap = read_deposit_cap(chain, alchemist)
+        click.echo(f"  on-chain depositCap(): {live_cap:,} wei")
+    except Exception as e:
+        click.echo(click.style(f"  warning: could not read live depositCap ({e}); defaulting to 0", fg="yellow"))
+
     # Build deposit batches
     click.echo(click.style("\n[2/4] Building deposit batches...", fg="cyan", bold=True))
 
@@ -129,6 +139,7 @@ def cli(
         alchemist_address=alchemist,
         multisig=multisig,
         chain=chain,
+        current_deposit_cap_wei=live_cap,
     )
 
     ok, errors = verify_batch_gas_limits(batches, chain=chain)

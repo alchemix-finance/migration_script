@@ -87,70 +87,80 @@ def create_deposit_batches(
     chain: str = "mainnet",
     current_deposit_cap_wei: int = 0,
 ) -> list[TransactionBatch]:
-    """Create deposit-only batches: [setDepositCap, deposit, deposit, ...]
+    """Create deposit-only batches: [setDepositCap?, deposit, deposit, ...]
 
     Each batch:
-      1. setDepositCap(currentCap + sum_of_this_batch_deposits)
-      2. For each user: deposit(amount, multisig, 0) → creates NFT
+      1. `setDepositCap(new_cap)` — ONLY when the cumulative required cap exceeds
+         the current live `depositCap()`. V3 alchemist reverts on downward
+         changes, so never emit a call that would lower the cap.
+      2. For each user: `deposit(amount, multisig, 0)` → creates NFT
 
     Mints are NOT included — they require real tokenIds from deposit events.
     Run `ape run read_ids` after these execute, then `ape run mint`.
+
+    `current_deposit_cap_wei`: pass the on-chain `depositCap()` value (read via
+    `src.preflight.read_deposit_cap`). Defaults to 0, which means "assume fresh
+    alchemist" — fine for first-run but causes reverts on any chain where the
+    cap is already raised (arbitrum alUSD, etc.). Callers should read live state.
     """
     from src.transactions import build_deposit_tx, build_set_deposit_cap_tx
 
     if not positions:
         return []
 
-    gas_limit = get_effective_gas_limit(chain)
-    size_limit = get_effective_size_limit(chain)
-    # Reserve 1 slot for setDepositCap at start of each batch
+    # Reserve gas + size headroom for a potential setDepositCap at batch start,
+    # so adding one doesn't push the batch past the chain limits. Even when we
+    # end up NOT emitting it (live cap already covers), the headroom is fine.
+    gas_limit = get_effective_gas_limit(chain) - GAS_SET_DEPOSIT_CAP
+    size_limit = get_effective_size_limit(chain) - MULTISEND_CALL_BYTES - 36  # 4 selector + 32 arg
+    # Reserve 1 slot for a potential setDepositCap at batch start.
     max_deposits = MAX_CALLS_PER_BATCH - 1
 
     batches: list[TransactionBatch] = []
     current_batch = TransactionBatch(batch_number=1, batch_type="deposit")
-    current_cap = current_deposit_cap_wei
+    # `live_cap` tracks what the alchemist's depositCap will be after any
+    # setDepositCap calls we've already emitted in earlier batches. Starts at
+    # the actual on-chain value.
+    live_cap = current_deposit_cap_wei
+    cumulative_needed = 0  # total deposit sum we've allocated across batches so far
     batch_deposit_sum = 0
 
-    # Placeholder for setDepositCap — replaced in _finalize_batch
-    cap_placeholder = TransactionCall(
-        to="", data=b"\x00" * 36, gas_estimate=GAS_SET_DEPOSIT_CAP,
-        description="setDepositCap(TBD)",
-    )
-    current_batch.add_call(cap_placeholder)
-
-    def _finalize_batch(batch: TransactionBatch, cap_sum: int, cap_base: int) -> TransactionBatch:
-        new_cap = cap_base + cap_sum
-        cap_tx = build_set_deposit_cap_tx(alchemist_address, new_cap)
-        batch.calls[0] = cap_tx
+    def _finalize_batch(batch: TransactionBatch, cap_sum: int) -> TransactionBatch:
+        """Finalize batch by prepending setDepositCap IF the new cumulative
+        requirement exceeds the live cap; otherwise omit it entirely."""
+        nonlocal live_cap
+        new_cap_needed = cumulative_needed  # includes this batch's sum already
+        if new_cap_needed > live_cap:
+            cap_tx = build_set_deposit_cap_tx(alchemist_address, new_cap_needed)
+            batch.calls.insert(0, cap_tx)
+            batch.total_gas += cap_tx.gas_estimate
+            live_cap = new_cap_needed
         batch.deposit_sum_wei = cap_sum
         return batch
 
     def _start_new_batch(n: int) -> TransactionBatch:
-        b = TransactionBatch(batch_number=n, batch_type="deposit")
-        b.add_call(TransactionCall(
-            to="", data=b"\x00" * 36, gas_estimate=GAS_SET_DEPOSIT_CAP,
-            description="setDepositCap(TBD)",
-        ))
-        return b
+        return TransactionBatch(batch_number=n, batch_type="deposit")
 
     for position in positions:
         dep_tx = build_deposit_tx(position, alchemist_address, multisig)
 
-        deposits_in_batch = len(current_batch.calls) - 1  # minus cap call
-        if deposits_in_batch >= max_deposits or not _can_add_call(
+        # Will adding this call exceed any batch limit? If so, finalize current
+        # batch and start a new one. Reserve 1 slot for the cap call (may or
+        # may not be emitted, but we budget conservatively).
+        if len(current_batch.calls) >= max_deposits or not _can_add_call(
             current_batch, dep_tx, gas_limit, size_limit, MAX_CALLS_PER_BATCH
         ):
-            if len(current_batch.calls) > 1:
-                batches.append(_finalize_batch(current_batch, batch_deposit_sum, current_cap))
-                current_cap += batch_deposit_sum
+            if current_batch.calls:
+                batches.append(_finalize_batch(current_batch, batch_deposit_sum))
             current_batch = _start_new_batch(len(batches) + 1)
             batch_deposit_sum = 0
 
         current_batch.add_call(dep_tx)
         batch_deposit_sum += position.deposit_amount_wei
+        cumulative_needed += position.deposit_amount_wei
 
-    if len(current_batch.calls) > 1:
-        batches.append(_finalize_batch(current_batch, batch_deposit_sum, current_cap))
+    if current_batch.calls:
+        batches.append(_finalize_batch(current_batch, batch_deposit_sum))
 
     return batches
 

@@ -126,6 +126,21 @@ def check_whitelist_transition_done(
     return done, msg, {"v2_whitelisted": v2_wl, "v3_whitelisted": v3_wl}
 
 
+def read_deposit_cap(chain: str, alchemist_address: str) -> int:
+    """Read the live `depositCap()` value on the alchemist.
+
+    Used to avoid emitting `setDepositCap(...)` calls that would lower the
+    already-higher live cap — V3 alchemist reverts on downward changes.
+    """
+    from web3 import Web3
+    from eth_utils import keccak
+    from eth_abi import decode
+    w3 = Web3(Web3.HTTPProvider(_rpc_url(chain), request_kwargs={"timeout": 15}))
+    sel = keccak(text="depositCap()")[:4]
+    raw = w3.eth.call({"to": Web3.to_checksum_address(alchemist_address), "data": "0x" + sel.hex()})
+    return int(decode(["uint256"], raw)[0])
+
+
 def check_deposit_done(
     chain: str, nft_address: str, multisig: str, expected_positions: int,
 ) -> tuple[bool, str, dict[str, int]]:
