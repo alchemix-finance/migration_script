@@ -110,20 +110,20 @@ CHAINS: dict[str, ChainConfig] = {
         "chain_id": 10,
         "multisig": "0x3Dda174aa9E897e18b8E10e6Ce39c2a52398181d",
         "usd": {
-            "alchemist": "",
-            "myt": "",
-            "al_token": "",
+            "alchemist": "0x930750a3510E703535e943E826ABa3c364fFC1De",
+            "myt": "0xAf510a560744880410f0f65e3341A020FBC2cA41",
+            "al_token": "0xCB8FA9a76b8e203D8C3797bF438d8FB81Ea3326A",
             "underlying": "",
-            "nft": "",          # AlchemistV3Position address — fill in after deployment
-            "myt_decimals": 18, # USDCMYT vault uses 18 decimals (standard ERC-4626)
+            "nft": "0xF700c7e40efCA6f7a810e172AFCee3592ff4aD33",
+            "myt_decimals": 18,
         },
         "eth": {
-            "alchemist": "",
-            "myt": "",
-            "al_token": "",
+            "alchemist": "0xDeD3A04612FF12b57317abE38e68026Fc9D28114",
+            "myt": "0x91b8657aea26Caa8A0E9D6DD4E24727Ccf32F822",
+            "al_token": "0x3E29D3A9316dAB217754d13b28646B76607c5f04",
             "underlying": "",
-            "nft": "",          # AlchemistV3Position address — fill in after deployment
-            "myt_decimals": 18, # WETHMYT vault uses 18 decimals (same as WETH underlying)
+            "nft": "0x763F5d567403add750e13234DB896CFe6b423059",
+            "myt_decimals": 18,
         },
     },
     "arbitrum": {
