@@ -14,9 +14,9 @@ class AssetConfig(TypedDict):
     """Configuration for one asset type within a chain."""
 
     alchemist: str      # AlchemistV3 contract for this asset
-    myt: str            # MYT token (USDCMYT or WETHMYT)
+    myt: str            # MYT / ERC4626 share token passed to alchemist.deposit
     al_token: str       # alUSD or alETH token
-    underlying: str     # USDC or WETH
+    underlying: str     # Often vault asset(); may match myt for config completeness (unused by deposit encoding)
     nft: str            # AlchemistV3Position contract — separate from AlchemistV3. Read from alchemist.alchemistPositionNFT()
     myt_decimals: int   # Decimal precision of the MYT vault token (6 for USDCMYT, 18 for WETHMYT).
                         # CSV underlyingValue is exported as 18-decimal wei; deposit amount is
@@ -133,7 +133,7 @@ CHAINS: dict[str, ChainConfig] = {
             "alchemist": "0x930750a3510E703535e943E826ABa3c364fFC1De",
             "myt": "0xEba62B842081CeF5a8184318Dc5C4E4aACa9f651",
             "al_token": "0xCB8FA9a76b8e203D8C3797bF438d8FB81Ea3326A",
-            "underlying": "",
+            "underlying": "0xEba62B842081CeF5a8184318Dc5C4E4aACa9f651",
             "nft": "0xF700c7e40efCA6f7a810e172AFCee3592ff4aD33",
             "myt_decimals": 18,
         },
@@ -141,7 +141,7 @@ CHAINS: dict[str, ChainConfig] = {
             "alchemist": "0xDeD3A04612FF12b57317abE38e68026Fc9D28114",
             "myt": "0xfe8F223F3d81462F55bf8609897B8cEcfA4B195C",
             "al_token": "0x17573150d67d820542EFb24210371545a4868B03",
-            "underlying": "",
+            "underlying": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
             "nft": "0x763F5d567403add750e13234DB896CFe6b423059",
             "myt_decimals": 18,
         },

@@ -6,6 +6,10 @@ Usage:
     ape run deposit --chain mainnet --asset usd
     ape run deposit --chain mainnet --asset usd --dry-run
 
+Proposes batches to the Safe one at a time: after each batch (except the last),
+you can review the queue before confirming the next. Use `-y` to propose all
+batches without those pauses.
+
 After deposits execute on-chain, run `ape run read_ids` to capture token IDs.
 """
 
@@ -147,7 +151,9 @@ def cli(
     if not yes:
         click.echo(
             click.style("\nWARNING: ", fg="red", bold=True) +
-            f"About to propose {len(batches)} deposit Safe tx(s) on {chain} ({asset_type.value}).\n"
+            f"About to propose deposit Safe txs on {chain} ({asset_type.value}) "
+            f"({len(batches)} batch(es)).\n"
+            f"The first batch is proposed, then you confirm each following batch after reviewing the Safe queue.\n"
             f"NOTE: This only creates NFT positions (no minting)."
         )
         if dry_run:
@@ -170,36 +176,45 @@ def cli(
     safe_txs = format_safe_batch(batches, chain_id=chain_id)
     proposer = ProposeToSafe(safe_address=multisig, chain_id=chain_id)
 
-    # Checkpoint mode: propose first batch, pause for verification, then continue
-    all_results = []
-    first_batch = [safe_txs[0]]
-    remaining_batches = safe_txs[1:]
+    # Checkpoint mode: propose one batch at a time; pause for verification before each next batch.
+    all_results: list = []
+    n_batches = len(safe_txs)
+    safe_url = f"https://app.safe.global/transactions/queue?safe=eth:{multisig}"
 
-    click.echo(click.style("\n[CHECKPOINT] Proposing first batch...", fg="yellow", bold=True))
-    first_results = proposer.propose_all_batches(first_batch)
-    all_results.extend(first_results)
+    for i, safe_tx in enumerate(safe_txs):
+        if i > 0 and not yes:
+            click.echo(click.style(
+                f"\n[CHECKPOINT] Batches proposed so far: {i}/{n_batches}. "
+                f"Review batch {i} in the Safe queue before continuing.",
+                fg="yellow", bold=True,
+            ))
+            click.echo(f"  Safe: {safe_url}")
+            if not click.confirm(
+                click.style(f"Propose batch {i + 1}/{n_batches}?", fg="yellow")
+            ):
+                click.echo(click.style(
+                    "Aborted. Earlier batches may already be in the Safe queue — cancel there if needed.",
+                    fg="red",
+                ))
+                raise SystemExit(1)
 
-    first_ok = sum(1 for r in first_results if r.get("status") in ("success", "stubbed"))
-    if first_ok == 0:
-        click.echo(click.style("First batch proposal failed. Aborting.", fg="red"))
-        raise SystemExit(1)
+        label = f"batch {i + 1}/{n_batches}" if n_batches > 1 else "batch"
+        click.echo(click.style(f"\n[CHECKPOINT] Proposing {label}...", fg="yellow", bold=True))
+        batch_results = proposer.propose_all_batches([safe_tx])
+        all_results.extend(batch_results)
 
-    click.echo(click.style(
-        "\n[CHECKPOINT] First batch proposed. Verify in Safe UI before continuing.",
-        fg="yellow", bold=True,
-    ))
-    click.echo(f"  Safe: https://app.safe.global/transactions/queue?safe=eth:{multisig}")
-    click.echo(f"  Verify: cross-reference the CSV data in the batch calldata.")
-    click.echo(f"  Remaining batches: {len(remaining_batches)}")
+        ok = sum(1 for r in batch_results if r.get("status") in ("success", "stubbed"))
+        if ok == 0:
+            click.echo(click.style(f"Batch {i + 1} proposal failed. Aborting.", fg="red"))
+            raise SystemExit(1)
 
-    if not click.confirm(click.style("Verified first batch. Continue with remaining?", fg="yellow")):
-        click.echo(click.style("Aborted. First batch still proposed — cancel in Safe UI if needed.", fg="red"))
-        raise SystemExit(1)
-
-    if remaining_batches:
-        click.echo(click.style("\nProposing remaining batches...", fg="cyan"))
-        remaining_results = proposer.propose_all_batches(remaining_batches)
-        all_results.extend(remaining_results)
+        if i < n_batches - 1:
+            click.echo(click.style(
+                f"\n[CHECKPOINT] Batch {i + 1}/{n_batches} proposed. Verify in Safe UI.",
+                fg="yellow", bold=True,
+            ))
+            click.echo(f"  Safe: {safe_url}")
+            click.echo("  Verify: cross-reference the CSV data in the batch calldata.")
 
     ok_count = sum(1 for r in all_results if r.get("status") in ("success", "stubbed"))
     fail_count = len(all_results) - ok_count
