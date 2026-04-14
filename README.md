@@ -1,23 +1,242 @@
 # Alchemix V2 → V3 Migration Script
 
-Python tooling for migrating Alchemix V2 CDP positions to V3 architecture. Reads position snapshots from CSV files, encodes the required V3 contract calls, batches them within per-chain gas and size limits, and proposes each batch as a Gnosis Safe multisig transaction.
+Python tooling for migrating Alchemix V2 CDP positions to V3. Reads position snapshots from CSV, encodes V3 contract calls, batches them within gas/size limits, and proposes each batch as a signed Gnosis Safe multisig transaction.
 
 ---
 
-## How it works
+## Quick Start
 
-V2 positions cannot be migrated in-place. The protocol must:
+```bash
+# 1. Clone and install
+git clone https://github.com/alchemix-finance/migration_script
+cd migration_script
+pip install eth-ape
+ape plugins install alchemy etherscan
+pip install python-dotenv
 
-1. Read a snapshot of all V2 positions (address, collateral, net debt) from a CSV.
-2. For each user, deposit collateral as MYT shares into V3 (creates NFT positions).
-3. Read the on-chain token IDs assigned to each position.
-4. Mint alAssets against each debt user's position.
-5. Team verifies all positions match the snapshot.
-6. Transfer each position NFT to its original user.
-7. Send alAsset credit to users the protocol owed (negative debt in V2).
-8. Multisig burns remaining alAssets manually.
+# 2. Set up environment
+cp .env.example .env
+# Edit .env — fill in your Alchemy API key, proposer PK, and proposer address
 
-All transactions are proposed to a Gnosis Safe multisig. No private key is ever used directly — Safe signers approve and execute.
+# 3. Run migration (example: mainnet alUSD)
+ape run deposit   --chain mainnet --asset usd
+ape run read_ids  --chain mainnet --asset usd --from-block <block>
+ape run mint      --chain mainnet --asset usd
+ape run verify    --chain mainnet --asset usd
+ape run distribute --chain mainnet --asset usd
+ape run credit    --chain mainnet --asset usd
+```
+
+Each script with Safe proposals runs in **checkpoint mode**: it proposes the first batch, prints the Safe UI link, and pauses. You verify the batch in the Safe UI against the CSV data. If it looks good, confirm in terminal and remaining batches proceed. If not, the script aborts cleanly.
+
+---
+
+## Environment Setup
+
+Copy `.env.example` to `.env` and fill in three things:
+
+```bash
+# Get from https://dashboard.alchemy.com/
+ALCHEMY_API_KEY=your_alchemy_api_key
+
+# The private key of the proposer account (must be a Safe owner on each multisig)
+# 64 hex chars, no 0x prefix
+PROPOSER_PRIVATE_KEY=abcdef1234567890abcdef...
+
+# The address of the proposer (derived from the key above)
+PROPOSER_ADDRESS=0xYourAddressHere
+```
+
+That's it. Contract addresses are already configured in `src/config.py` for all three chains.
+
+---
+
+## Migration Flow
+
+Run these in order, **per asset per chain**. Steps 1 and 3 require on-chain execution before proceeding.
+
+```
+Step 1: deposit.py    — Deposit MYT into alchemist, creates NFT positions
+          ↓ (wait for on-chain execution)
+Step 2: read_ids.py   — Read token IDs from NFT Transfer events
+          ↓
+Step 3: mint.py       — Mint alAssets against debt users' positions
+          ↓ (wait for on-chain execution)
+Step 4: verify.py     — Verify all positions match the CSV snapshot
+          ↓ (DO NOT proceed if verify fails)
+Step 5: distribute.py — Transfer NFTs to users
+          ↓ (wait for on-chain execution)
+Step 6: credit.py     — Send alAsset credit to credit users
+
+After all steps: multisig burns remaining alAssets manually.
+```
+
+### Checkpoint Mode
+
+Steps 1, 3, 5, and 6 all propose batches to the Safe. Instead of dumping everything at once, each script:
+
+1. Proposes the **first batch** and prints the Safe UI link
+2. Pauses and asks you to verify in Safe UI
+3. You cross-reference the calldata against your CSV
+4. Confirm → remaining batches go through. Deny → clean abort.
+
+This means if the first batch looks wrong, you catch it before 50 more get queued.
+
+### Three User Types
+
+The CSV has three kinds of users, handled differently:
+
+| Type | Debt value | What happens |
+|------|-----------|--------------|
+| **Debt user** | Positive | Deposit + Mint + NFT transfer. Carries debt into V3. |
+| **Credit user** | Negative | Deposit only + alAsset transfer. Zero V3 debt. Protocol owed them. |
+| **Zero-debt** | Zero | Deposit only + NFT transfer. Pure collateral position. |
+
+---
+
+## Commands
+
+### Validate CSV (no chain interaction)
+
+```bash
+ape run validate --chain mainnet --asset usd
+```
+
+### Step 1 — Deposit MYT
+
+```bash
+ape run deposit --chain mainnet --asset usd
+```
+
+### Step 2 — Read Token IDs
+
+After deposits land on chain, capture the token IDs:
+
+```bash
+ape run read_ids --chain mainnet --asset usd --from-block 12345678
+```
+
+Use the block number where the first deposit batch was executed.
+
+### Step 3 — Mint
+
+```bash
+ape run mint --chain mainnet --asset usd
+```
+
+Requires the token ID file from Step 2 to exist.
+
+### Step 4 — Verify
+
+```bash
+ape run verify --chain mainnet --asset usd
+```
+
+Checks that every position has a token ID, debt amounts match, credit users have zero debt, and total minted >= total credit. **Do not proceed past this step if it fails.**
+
+### Step 5 — Distribute NFTs
+
+```bash
+ape run distribute --chain mainnet --asset usd
+```
+
+### Step 6 — Credit
+
+```bash
+ape run credit --chain mainnet --asset usd
+```
+
+### Preview (no submission)
+
+```bash
+ape run migrate --chain mainnet --asset usd --verbose
+```
+
+Shows the full plan without proposing anything to the Safe.
+
+**Supported chains:** `mainnet`, `optimism`, `arbitrum`
+**Supported assets:** `usd`, `eth`
+
+---
+
+## CSV Format
+
+One CSV per asset per chain at `data/alUSDValues-sum-and-debt-{chain}.csv` or `data/alETHValues-sum-and-debt-{chain}.csv`.
+
+```csv
+address,underlyingValue,debt
+0xAAA...,1000000000000000000,1000500000000000000
+0xBBB...,15000000000000000000,3000000000000000000
+0xCCC...,2000000000000000000,-250000000000000000
+```
+
+| Column | Description |
+|--------|-------------|
+| `address` | User's Ethereum address (42 chars) |
+| `underlyingValue` | Collateral in MYT shares, 18-decimal wei |
+| `debt` | Net debt. Positive = owes alAssets. Negative = protocol owes them. Zero = collateral only. |
+
+All values are 18-decimal integers (wei). No scientific notation, no decimals.
+
+---
+
+## Batch Constraints
+
+Batches are limited by gas, calldata size, and call count. Whichever limit is hit first triggers a new batch.
+
+| Chain | Effective Gas Limit | Max TX Size |
+|-------|--------------------:|------------:|
+| Mainnet | 13,500,000 (90% of 15M) | 128 KB |
+| Optimism | 13,500,000 | 120 KB |
+| Arbitrum | 13,500,000 | 118 KB |
+
+Each deposit batch starts with a `setDepositCap` call that raises the cap by the batch's total deposit amount. This means deposits can't front-run each other between batches.
+
+---
+
+## Contract Addresses
+
+All addresses are in `src/config.py`. Summarized here:
+
+### Mainnet
+
+| Contract | alUSD | alETH |
+|----------|-------|-------|
+| Alchemist | `0xeB83...7e3E` | `0xfa99...E26B` |
+| MYT Vault | `0x9B44...4bA5` | `0x29bc...c43D` |
+| alToken | `0xBC6D...60E9` | `0x0100...7Ee6` |
+| NFT | `0x872a...9bEB` | `0x15da...263d` |
+
+### Optimism
+
+| Contract | alUSD | alETH |
+|----------|-------|-------|
+| Alchemist | `0x9307...C1De` | `0xDeD3...8114` |
+| MYT Vault | `0xAf51...cA41` | `0x91b8...f822` |
+| alToken | `0xCB8F...326A` | `0x3E29...5f04` |
+| NFT | `0xF700...4aD33` | `0x763F...3059` |
+
+### Arbitrum
+
+| Contract | alUSD | alETH |
+|----------|-------|-------|
+| Alchemist | `0x9307...C1De` | `0xDeD3...8114` |
+| MYT Vault | `0xEba6...9f651` | `0xfe8F...B195C` |
+| alToken | `0xCB8F...326A` | `0x1757...68B03` |
+| NFT | `0xF700...4aD33` | `0x763F...3059` |
+
+**Multisigs:** Mainnet `0xF56D...293D` · Optimism `0x3Dda...181d` · Arbitrum `0xeE1A...8484b`
+
+---
+
+## Pre-Migration Checklist
+
+- [ ] `.env` created with Alchemy key, proposer PK, and proposer address
+- [ ] Proposer address is a signer on all 3 migration multisigs
+- [ ] Multisig holds enough MYT shares to cover total deposits for each asset
+- [ ] Multisig is set as `admin` on each AlchemistV3
+- [ ] Run `ape run validate --chain <chain> --asset <asset>` for all combinations
+- [ ] Dry run: `ape run migrate --chain <chain> --asset <asset> --verbose`
 
 ---
 
@@ -25,294 +244,51 @@ All transactions are proposed to a Gnosis Safe multisig. No private key is ever 
 
 ```
 migration_script/
-├── ape-config.yaml               # Apeworx project config (networks, plugins)
-├── contracts/
-│   ├── alchemist_abi.json        # AlchemistV3 ABI: setDepositCap, deposit, mint
-│   ├── altoken_abi.json          # alToken ABI: transfer, burn
-│   └── erc721_abi.json           # ERC721 ABI: transferFrom
-├── data/
-│   ├── alUSDValues-sum-and-debt-mainnet.csv
-│   ├── alETHValues-sum-and-debt-mainnet.csv
-│   ├── token_ids-alUSD-mainnet.json   # Written by read_ids.py
-│   └── ...                       # One CSV per asset × chain
+├── .env.example          # Environment template
+├── ape-config.yaml       # Apeworx config (networks, plugins)
+├── contracts/            # ABIs (alchemist, erc721, altoken)
+├── data/                 # CSVs + token ID JSONs (written by read_ids)
 ├── scripts/
-│   ├── deposit.py                # Step 1 — deposit MYT, create NFT positions
-│   ├── read_ids.py               # Step 2 — read token IDs from deposit events
-│   ├── mint.py                   # Step 3 — mint alAsset debt using real token IDs
-│   ├── verify.py                 # Step 4 — verify positions match snapshot
-│   ├── distribute.py             # Step 5 — transfer NFTs to users
-│   ├── credit.py                 # Step 6 — send alAsset credit to credit users
-│   ├── migrate.py                # Preview all steps (no submission)
-│   ├── batch.py                  # Batch statistics (no submission)
-│   ├── preview.py                # Human-readable plan preview
-│   └── validate.py               # CSV-only validation
+│   ├── deposit.py        # Step 1 — deposit MYT, create NFTs
+│   ├── read_ids.py       # Step 2 — read token IDs from events
+│   ├── mint.py           # Step 3 — mint alAssets for debt users
+│   ├── verify.py         # Step 4 — verify positions match CSV
+│   ├── distribute.py     # Step 5 — transfer NFTs to users
+│   ├── credit.py         # Step 6 — send alAsset credit
+│   ├── migrate.py        # Preview all steps (no submission)
+│   ├── batch.py          # Batch statistics
+│   └── validate.py       # CSV validation only
 ├── src/
-│   ├── abi.py                    # ABI file loading
-│   ├── config.py                 # Chain/asset addresses, per-chain gas limits
-│   ├── gas.py                    # Batch creation with gas + size + call-count limits
-│   ├── preview.py                # Formatted plan display
-│   ├── safe.py                   # Gnosis Safe encoding and API client
-│   ├── transactions.py           # Per-operation calldata builders
-│   ├── types.py                  # Data models (CSVRow, PositionMigration, etc.)
-│   └── validation.py             # CSV parsing and validation
-└── tests/                        # pytest test suite
+│   ├── config.py         # Chain addresses, gas limits, helpers
+│   ├── env.py            # .env loader and typed accessors
+│   ├── gas.py            # Multi-constraint batch creation
+│   ├── safe.py           # Safe encoding, signing, and API client
+│   ├── transactions.py   # ABI-encoded calldata builders
+│   ├── types.py          # Data models (CSVRow, PositionMigration, etc.)
+│   └── validation.py     # CSV parsing and decimal handling
+└── tests/                # pytest suite
 ```
-
----
-
-## Prerequisites
-
-- Python 3.11+
-- [Apeworx](https://docs.apeworx.io/) (`pip install eth-ape`)
-- Ape plugins: `ape plugins install alchemy etherscan`
-- Access to an Alchemy RPC endpoint for each chain
-- The migration multisig address set as an **admin** on each AlchemistV3 contract before running
-
----
-
-## Installation
-
-```bash
-git clone https://github.com/alchemix-finance/migration_script
-cd migration_script
-pip install eth-ape
-ape plugins install alchemy etherscan
-```
-
----
-
-## Configuration
-
-Before running, fill in all contract addresses in `src/config.py`:
-
-```python
-CHAINS = {
-    "mainnet": {
-        "chain_id": 1,
-        "multisig": "0xF56D660138815fC5d7a06cd0E1630225E788293D",  # ← already set
-        "usd": {
-            "alchemist": "",    # AlchemistV3 for alUSD — fill in after deployment
-            "myt":        "",   # USDC MYT vault token address
-            "al_token":   "",   # alUSD token address
-            "underlying": "",   # USDC address
-            "nft":        "",   # AlchemistV3Position — read from alchemist.alchemistPositionNFT()
-        },
-        ...
-    },
-}
-```
-
-> **Note:** The NFT contract address (`AlchemistV3Position`) is a **separate contract** from `AlchemistV3`. Read it from `alchemist.alchemistPositionNFT()` after deployment and set it in the config before running.
-
----
-
-## CSV Format
-
-One CSV per asset per chain. File naming convention:
-
-```
-data/alUSDValues-sum-and-debt-{chain}.csv
-data/alETHValues-sum-and-debt-{chain}.csv
-```
-
-Schema:
-
-```csv
-address,underlyingValue,debt
-0xAAA...,1000000000000000000,1000500000000000000
-0xBBB...,15000000000000000000,3000000000000000000
-0xCCC...,2000000000000000000,-250000000000000000
-0xDDD...,8000000000000000000,0
-```
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `address` | `0x...` (42 chars) | User's Ethereum address |
-| `underlyingValue` | integer (wei) | Collateral in MYT shares at migration time |
-| `debt` | integer (wei) | Positive = user owes alAssets. Negative = protocol owes user alAssets (credit). Zero = collateral-only. |
-
-Rules:
-- One row per user per asset. A user with both alUSD and alETH positions appears in two separate files.
-- Duplicate addresses within a file are rejected.
-- Rows with `underlyingValue = 0` are rejected (users with no collateral are not migrated).
-- Values must be plain integers in wei — no scientific notation, no decimals.
-
-> **Decimal precision:** Both USDCMYT and WETHMYT are standard 18-decimal ERC-4626 vault tokens. All values in the CSV are already in 18-decimal atomic units — no rescaling is applied.
-
----
-
-## Migration Flow
-
-The migration runs in **5 steps** per asset per chain. Each step targets ~50 calls per Safe batch, constrained by 90% of each chain's block gas limit and transaction size limit.
-
-```
-Step 1 — Deposit  (deposit.py)
-  For each user:
-    setDepositCap(currentCap + batchDepositSum)
-    deposit(myt_shares, multisig, tokenId=0)       → creates NFT
-
-Step 2 — Read Token IDs + Mint  (read_ids.py + mint.py)
-  read_ids: queries NFT Transfer(from=0x0, to=multisig) events → token_ids JSON
-  mint: for each DEBT user (not credit users):
-    mint(tokenId, debt_amount, multisig)           → mints alAssets to multisig
-
-Step 3 — Verify  (verify.py)
-  Checks all positions match snapshot:
-    - Every position has a token ID
-    - Debt users have correct mint amounts
-    - Credit users have ZERO debt (no mint was done against their position)
-    - total_mint >= total_credit (enough alAssets to cover credit distribution)
-
-Step 4 — Distribute NFTs  (distribute.py)
-  For each user:
-    ERC721.transferFrom(multisig, user, tokenId)
-
-Step 5 — Credit Distribution  (credit.py)
-  For each credit user:
-    alToken.transfer(user, credit_amount)
-
-Burn — manual by multisig after all steps complete.
-```
-
-**Why deposits and mints are separate:**
-`mint(tokenId, ...)` requires the real tokenId assigned by the contract at deposit time. MultiSend can't chain return values between calls, so we must deposit first, read the assigned tokenIds from events, then mint in a separate step.
-
-**Credit user handling:**
-Credit users (negative debt in V2) receive only a deposit — no mint against their position, so they have **zero debt** in V3. Their alAsset credit is distributed separately from the pool of alAssets minted for debt users. The multisig burns leftover alAssets manually after all steps complete.
-
----
-
-## Commands
-
-### Validate CSV only
-
-```bash
-ape run validate --chain mainnet --asset usd
-```
-
-### Preview full plan (no transactions submitted)
-
-```bash
-ape run migrate --chain mainnet --asset usd --verbose
-ape run batch --chain mainnet --asset usd
-```
-
-### Step 1 — Deposit
-
-```bash
-ape run deposit --chain mainnet --asset usd --dry-run
-ape run deposit --chain mainnet --asset usd --yes
-```
-
-### Step 2 — Read token IDs + Mint
-
-```bash
-ape run read_ids --chain mainnet --asset usd --from-block 12345678
-ape run mint --chain mainnet --asset usd --dry-run
-ape run mint --chain mainnet --asset usd --yes
-```
-
-### Step 3 — Verify
-
-```bash
-ape run verify --chain mainnet --asset usd
-```
-
-### Step 4 — Distribute NFTs
-
-```bash
-ape run distribute --chain mainnet --asset usd --dry-run
-ape run distribute --chain mainnet --asset usd --yes
-```
-
-### Step 5 — Credit
-
-```bash
-ape run credit --chain mainnet --asset usd --dry-run
-ape run credit --chain mainnet --asset usd --yes
-```
-
-Chains: `mainnet`, `optimism`, `arbitrum`
-
----
-
-## Per-Chain Limits
-
-Batches are constrained by three limits (whichever is hit first):
-
-| Chain | Block Gas | TX Gas Limit | Max TX Size | Effective Gas (90%) |
-|-------|-----------|-------------|-------------|--------------------:|
-| Ethereum Mainnet | 60M | 15M | 128 KB | 13,500,000 |
-| Optimism | 30M | 15M | 120 KB | 13,500,000 |
-| Arbitrum One | 32M | 15M | 118 KB | 13,500,000 |
-
-Batches fill to ~90% of the per-transaction gas limit. Typical batch sizes:
-
-| Operation | Gas/call | Calls/batch | Gas utilization |
-|-----------|---------|------------|-----------------|
-| `deposit` | 175K | ~76 | ~90% |
-| `mint` | 130K | ~103 | ~90% |
-| `transferFrom` | 70K | ~192 | ~90% |
-| `alToken.transfer` | 65K | ~207 | ~90% |
-
----
-
-## V3 Contract Interface Reference
-
-| Contract | Function | Signature | Access |
-|----------|----------|-----------|--------|
-| AlchemistV3 | `setDepositCap` | `setDepositCap(uint256 value)` | `onlyAdmin` |
-| AlchemistV3 | `deposit` | `deposit(uint256 amount, address recipient, uint256 tokenId)` | open |
-| AlchemistV3 | `mint` | `mint(uint256 tokenId, uint256 amount, address recipient)` | NFT owner |
-| AlchemistV3Position | `transferFrom` | `transferFrom(address from, address to, uint256 tokenId)` | ERC721 |
-| alToken | `transfer` | `transfer(address to, uint256 amount) → bool` | ERC20 |
-
-Key behaviors:
-- `deposit(amount, recipient, 0)` — `tokenId=0` creates a new position and mints NFT to `recipient`. Actual tokenId emitted in `AlchemistV3PositionNFTMinted`.
-- `mint(tokenId, amount, multisig)` — `msg.sender` must be NFT owner. alAssets land in multisig.
-- `setDepositCap` — requires multisig to be admin on each AlchemistV3.
-
----
-
-## Gas Estimates
-
-| Operation | Gas |
-|-----------|----:|
-| `setDepositCap` | 35,000 |
-| `deposit` (new position) | 175,000 |
-| `deposit` (large, > 10²¹ wei) | 190,000 |
-| `mint` | 130,000 |
-| `mint` (large) | 145,000 |
-| `alToken.transfer` (credit) | 65,000 |
-| `ERC721.transferFrom` | 70,000 |
-
----
-
-## Pre-Migration Checklist
-
-- [ ] All AlchemistV3 contracts deployed and addresses filled into `src/config.py`
-- [ ] `nft` address set in each asset config (read from `alchemist.alchemistPositionNFT()`)
-- [ ] Migration multisig set as `admin` on each AlchemistV3
-- [ ] Multisig funded with enough MYT shares to cover total deposit amounts
-- [ ] Dry run passes: `ape run deposit --dry-run`, `ape run mint --dry-run`, `ape run distribute --dry-run`, `ape run credit --dry-run`
-- [ ] Distribute and credit scripts not run until deposit + mint + verify are complete
-
----
-
-## Chains Supported
-
-| Chain | Chain ID | Multisig | Block Gas | TX Gas |
-|-------|----------|----------|----------:|-------:|
-| Ethereum Mainnet | 1 | `0xF56D660138815fC5d7a06cd0E1630225E788293D` | 60M | 15M |
-| Optimism | 10 | `0x3Dda174aa9E897e18b8E10e6Ce39c2a52398181d` | 30M | 15M |
-| Arbitrum One | 42161 | `0xeE1Aa1C3D0622fCeD823c7720cf9E8079558484b` | 32M | 15M |
 
 ---
 
 ## Security Notes
 
-- The migration multisig temporarily holds all position NFTs and all minted alAssets. It must be a properly secured multi-signature wallet.
-- Steps 4-5 (distribute + credit) should only execute **after team verification** that deposits and mints completed correctly.
-- Token ID placeholder `999999` is used in preview/dry-run mode. Real execution requires `read_ids` to have captured the mapping first.
-- Debt user positions carry their V2 debt on the NFT after migration. This is intentional — the debt is real and repays over time via yield.
-- Credit users end up with **zero debt** on their position. Their alAsset credit is sent separately. The remaining minted alAssets are burned by the multisig.
+- The proposer PK signs Safe transaction hashes locally. The key never leaves your machine.
+- All transactions go through Gnosis Safe multisig. The proposer only *suggests* transactions — Safe owners must approve and execute.
+- Checkpoint mode means you verify the first batch in Safe UI before the rest proceed.
+- Token IDs are captured from on-chain events, not hardcoded. The `read_ids` step validates that event count matches CSV position count.
+- The multisig temporarily holds all NFTs and minted alAssets during migration. Steps 5-6 distribute them to users.
+
+---
+
+## V3 Contract Interface
+
+| Function | Signature | Access |
+|----------|-----------|--------|
+| `setDepositCap` | `setDepositCap(uint256)` | admin only |
+| `deposit` | `deposit(uint256 amount, address recipient, uint256 tokenId)` | open |
+| `mint` | `mint(uint256 tokenId, uint256 amount, address recipient)` | NFT owner |
+| `transferFrom` | `transferFrom(address from, address to, uint256 tokenId)` | ERC721 |
+| `transfer` | `transfer(address to, uint256 amount) → bool` | ERC20 |
+
+`deposit(amount, recipient, 0)` creates a new position (tokenId=0 means "create new"). The actual token ID is emitted in the `AlchemistV3PositionNFTMinted` event.
