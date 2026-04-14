@@ -168,17 +168,47 @@ def cli(
     safe_txs = format_safe_batch(batches, chain_id=chain_id)
     proposer = ProposeToSafe(safe_address=multisig, chain_id=chain_id)
 
-    results = proposer.propose_all_batches(safe_txs)
-    ok_count = sum(1 for r in results if r.get("status") in ("success", "stubbed"))
-    fail_count = len(results) - ok_count
+    # Checkpoint mode: propose first batch, pause for verification, then continue
+    all_results = []
+    first_batch = [safe_txs[0]]
+    remaining_batches = safe_txs[1:]
+
+    click.echo(click.style("\n[CHECKPOINT] Proposing first batch...", fg="yellow", bold=True))
+    first_results = proposer.propose_all_batches(first_batch)
+    all_results.extend(first_results)
+
+    first_ok = sum(1 for r in first_results if r.get("status") in ("success", "stubbed"))
+    if first_ok == 0:
+        click.echo(click.style("First batch proposal failed. Aborting.", fg="red"))
+        raise SystemExit(1)
+
+    click.echo(click.style(
+        "\n[CHECKPOINT] First batch proposed. Verify in Safe UI before continuing.",
+        fg="yellow", bold=True,
+    ))
+    click.echo(f"  Safe: https://app.safe.global/transactions/queue?safe=eth:{multisig}")
+    click.echo(f"  Verify: cross-reference the CSV data in the batch calldata.")
+    click.echo(f"  Remaining batches: {len(remaining_batches)}")
+
+    if not click.confirm(click.style("Verified first batch. Continue with remaining?", fg="yellow")):
+        click.echo(click.style("Aborted. First batch still proposed — cancel in Safe UI if needed.", fg="red"))
+        raise SystemExit(1)
+
+    if remaining_batches:
+        click.echo(click.style("\nProposing remaining batches...", fg="cyan"))
+        remaining_results = proposer.propose_all_batches(remaining_batches)
+        all_results.extend(remaining_results)
+
+    ok_count = sum(1 for r in all_results if r.get("status") in ("success", "stubbed"))
+    fail_count = len(all_results) - ok_count
 
     status = (
         click.style("SUCCESS", fg="green", bold=True) if fail_count == 0
-        else click.style(f"PARTIAL ({ok_count}/{len(results)})", fg="yellow", bold=True)
+        else click.style(f"PARTIAL ({ok_count}/{len(all_results)})", fg="yellow", bold=True)
     )
 
     click.echo(f"\nStatus: {status}")
-    click.echo(f"Proposed: {ok_count}/{len(results)} transfer batches")
+    click.echo(f"Proposed: {ok_count}/{len(all_results)} transfer batches")
     click.echo(click.style(
         f"\nNext: run `ape run credit --chain {chain} --asset {asset}` to send credits.",
         fg="cyan",
