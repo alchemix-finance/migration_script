@@ -241,6 +241,99 @@ def create_credit_batches(
     return batches
 
 
+def create_approve_underlying_batches(
+    underlying_address: str,
+    myt_address: str,
+    amount_wei: int,
+    chain: str = "mainnet",
+) -> list[TransactionBatch]:
+    """One-call batch: approve(myt, amount) on the underlying ERC20.
+
+    Lets the MYT vault pull underlying (USDC / WETH) from the multisig
+    during the MYT deposit step.
+    """
+    from src.transactions import build_erc20_approve_tx
+
+    if amount_wei <= 0:
+        return []
+    tx = build_erc20_approve_tx(
+        token_address=underlying_address,
+        spender=myt_address,
+        amount_wei=amount_wei,
+        description=f"approve underlying -> MYT ({amount_wei})",
+    )
+    batch = TransactionBatch(batch_number=1, batch_type="approve_underlying")
+    batch.add_call(tx)
+    return [batch]
+
+
+def create_myt_deposit_batches(
+    myt_address: str,
+    multisig: str,
+    assets_wei: int,
+    chain: str = "mainnet",
+) -> list[TransactionBatch]:
+    """One-call batch: MYT.deposit(assets, multisig) — mints MYT shares to multisig."""
+    from src.transactions import build_erc4626_deposit_tx
+
+    if assets_wei <= 0:
+        return []
+    tx = build_erc4626_deposit_tx(
+        vault_address=myt_address,
+        assets_wei=assets_wei,
+        receiver=multisig,
+        description=f"MYT.deposit({assets_wei}, multisig)",
+    )
+    batch = TransactionBatch(batch_number=1, batch_type="deposit_myt")
+    batch.add_call(tx)
+    return [batch]
+
+
+def create_approve_myt_batches(
+    myt_address: str,
+    alchemist_address: str,
+    amount_wei: int,
+    chain: str = "mainnet",
+) -> list[TransactionBatch]:
+    """One-call batch: approve(alchemist, amount) on the MYT share token.
+
+    Lets the Alchemist pull MYT from the multisig during the deposit step.
+    """
+    from src.transactions import build_erc20_approve_tx
+
+    if amount_wei <= 0:
+        return []
+    tx = build_erc20_approve_tx(
+        token_address=myt_address,
+        spender=alchemist_address,
+        amount_wei=amount_wei,
+        description=f"approve MYT -> Alchemist ({amount_wei})",
+    )
+    batch = TransactionBatch(batch_number=1, batch_type="approve_myt")
+    batch.add_call(tx)
+    return [batch]
+
+
+def compute_underlying_total(
+    positions: list[PositionMigration],
+    underlying_decimals: int,
+    myt_decimals: int = 18,
+) -> int:
+    """Total underlying needed to mint enough MYT shares to back all deposits.
+
+    CSV deposit_amount_wei is normalized to myt_decimals (18 for all V3 MYTs).
+    Underlying may be 6-decimal (USDC) or 18-decimal (WETH); rescale accordingly.
+    Rounds UP so we never under-approve.
+    """
+    total_myt = sum(p.deposit_amount_wei for p in positions)
+    if underlying_decimals == myt_decimals:
+        return total_myt
+    if underlying_decimals < myt_decimals:
+        divisor = 10 ** (myt_decimals - underlying_decimals)
+        return (total_myt + divisor - 1) // divisor  # ceil
+    return total_myt * (10 ** (underlying_decimals - myt_decimals))
+
+
 def create_transfer_batches(
     positions: list[PositionMigration],
     nft_address: str,
@@ -300,17 +393,38 @@ def build_migration_plan(
     multisig: str,
     current_deposit_cap_wei: int = 0,
     token_id_map: dict[str, int] | None = None,
+    myt_address: str = "",
+    underlying_address: str = "",
+    underlying_decimals: int = 18,
+    myt_decimals: int = 18,
 ) -> "MigrationPlan":
     """Build the full migration plan for one asset type on one chain.
 
     token_id_map: if provided, builds mint and transfer batches with real IDs.
                   If None, mint_batches are empty and transfers use placeholder 999999.
+    myt_address / underlying_address: if provided, also populates the three
+                  pre-deposit batch lists (approve_underlying, myt_deposit, approve_myt).
     """
     from src.types import AssetType, MigrationPlan
 
     asset_type = positions[0].asset_type if positions else AssetType.USD
 
     plan = MigrationPlan(chain=chain, asset_type=asset_type, positions=positions)
+
+    total_myt = plan.total_deposit_wei
+    if myt_address and underlying_address and total_myt > 0:
+        total_underlying = compute_underlying_total(
+            positions, underlying_decimals=underlying_decimals, myt_decimals=myt_decimals,
+        )
+        plan.approve_underlying_batches = create_approve_underlying_batches(
+            underlying_address, myt_address, total_underlying, chain,
+        )
+        plan.myt_deposit_batches = create_myt_deposit_batches(
+            myt_address, multisig, total_underlying, chain,
+        )
+        plan.approve_myt_batches = create_approve_myt_batches(
+            myt_address, alchemist_address, total_myt, chain,
+        )
 
     plan.deposit_batches = create_deposit_batches(
         positions, alchemist_address, multisig, chain, current_deposit_cap_wei,

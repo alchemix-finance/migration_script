@@ -399,13 +399,16 @@ class TestSerializeForSafeApi:
         assert serialized["baseGas"] == str(sample_safe_transaction.base_gas)
         assert serialized["gasPrice"] == str(sample_safe_transaction.gas_price)
 
-    def test_meta_included(self, sample_safe_transaction):
-        """Test that metadata is included."""
-        serialized = serialize_for_safe_api(sample_safe_transaction)
-        assert "_meta" in serialized
-        assert "descriptions" in serialized["_meta"]
-        assert "transactionCount" in serialized["_meta"]
-        assert "isMultiSend" in serialized["_meta"]
+    def test_meta_exposed_via_serialize_batch_for_display(self, sample_safe_transaction):
+        """V3 split: serialize_for_safe_api carries only API-required fields; the
+        human-readable "meta" lives on serialize_batch_for_display (descriptions,
+        transaction count, multisend flag). This test preserves the original
+        intent by asserting those fields on the display helper."""
+        display = serialize_batch_for_display(sample_safe_transaction)
+        assert "operations" in display  # descriptions
+        assert "operation_count" in display  # transactionCount
+        assert "type" in display  # single vs multisend indicator
+        assert display["type"] in ("Single", "MultiSend")
 
     def test_nonce_included(self):
         """Test that nonce is included when set."""
@@ -485,17 +488,34 @@ class TestProposeToSafe:
                 chain_id=999,
             )
 
-    def test_get_next_nonce(self):
-        """Test get_next_nonce returns placeholder."""
+    def test_get_next_nonce_respects_env_override(self, monkeypatch):
+        """With SAFE_PROPOSAL_START_NONCE set, no live API call is made.
+
+        V1 expected `get_next_nonce()` to work with any safe address (stub).
+        V3 actually fetches from the Safe Transaction Service, which requires a
+        real Safe and network access. The production path for users without
+        network access is to set SAFE_PROPOSAL_START_NONCE in .env; this test
+        verifies that override mechanism without hitting the network.
+        """
+        monkeypatch.setenv("SAFE_PROPOSAL_START_NONCE", "42")
+        monkeypatch.delenv("PROPOSER_PRIVATE_KEY", raising=False)
+        monkeypatch.delenv("PROPOSER_ADDRESS", raising=False)
+
         proposer = ProposeToSafe(
             safe_address="0x1111111111111111111111111111111111111111",
             chain_id=1,
+            signer_address="0x2222222222222222222222222222222222222222",
         )
-        nonce = proposer.get_next_nonce()
-        assert isinstance(nonce, int)
+        proposer._resolve_initial_nonce()
+        assert proposer._next_nonce == 42
 
-    def test_propose_batch_stubbed(self, sample_safe_transaction):
-        """Test propose_batch returns stubbed response."""
+    def test_propose_batch_stubbed(self, sample_safe_transaction, monkeypatch):
+        """Without a signing key, propose_batch returns a stubbed dict rather than
+        POSTing to the Safe API. Uses env nonce override so no network call runs."""
+        monkeypatch.setenv("SAFE_PROPOSAL_START_NONCE", "7")
+        monkeypatch.delenv("PROPOSER_PRIVATE_KEY", raising=False)
+        monkeypatch.delenv("PROPOSER_ADDRESS", raising=False)
+
         proposer = ProposeToSafe(
             safe_address="0x1111111111111111111111111111111111111111",
             chain_id=1,
@@ -507,17 +527,28 @@ class TestProposeToSafe:
         assert "safe_address" in result
         assert "transaction_data" in result
 
-    def test_propose_batch_requires_sender(self, sample_safe_transaction):
-        """Test propose_batch raises if no sender configured."""
+    def test_propose_batch_requires_sender(self, sample_safe_transaction, monkeypatch):
+        """propose_batch raises ValueError when no sender is configured."""
+        monkeypatch.setenv("SAFE_PROPOSAL_START_NONCE", "0")
+        monkeypatch.delenv("PROPOSER_PRIVATE_KEY", raising=False)
+        monkeypatch.delenv("PROPOSER_ADDRESS", raising=False)
+
         proposer = ProposeToSafe(
             safe_address="0x1111111111111111111111111111111111111111",
             chain_id=1,
         )
+        assert proposer.signer_address is None, (
+            "Test requires an environment without PROPOSER_ADDRESS set"
+        )
         with pytest.raises(ValueError, match="Sender address required"):
             proposer.propose_batch(sample_safe_transaction)
 
-    def test_propose_batch_sets_nonce(self, sample_safe_transaction):
-        """Test that propose_batch sets nonce if not already set."""
+    def test_propose_batch_sets_nonce(self, sample_safe_transaction, monkeypatch):
+        """propose_batch populates nonce from the env override and increments it."""
+        monkeypatch.setenv("SAFE_PROPOSAL_START_NONCE", "13")
+        monkeypatch.delenv("PROPOSER_PRIVATE_KEY", raising=False)
+        monkeypatch.delenv("PROPOSER_ADDRESS", raising=False)
+
         proposer = ProposeToSafe(
             safe_address="0x1111111111111111111111111111111111111111",
             chain_id=1,
@@ -525,10 +556,15 @@ class TestProposeToSafe:
         )
         assert sample_safe_transaction.nonce is None
         result = proposer.propose_batch(sample_safe_transaction)
-        assert result["nonce"] is not None
+        assert result["nonce"] == 13
+        assert proposer._next_nonce == 14  # advanced past this tx
 
-    def test_propose_all_batches(self, sample_safe_transaction):
-        """Test propose_all_batches handles multiple transactions."""
+    def test_propose_all_batches(self, sample_safe_transaction, monkeypatch):
+        """propose_all_batches handles multiple transactions, advancing the nonce each time."""
+        monkeypatch.setenv("SAFE_PROPOSAL_START_NONCE", "100")
+        monkeypatch.delenv("PROPOSER_PRIVATE_KEY", raising=False)
+        monkeypatch.delenv("PROPOSER_ADDRESS", raising=False)
+
         proposer = ProposeToSafe(
             safe_address="0x1111111111111111111111111111111111111111",
             chain_id=1,
@@ -540,6 +576,8 @@ class TestProposeToSafe:
         )
         results = proposer.propose_all_batches([sample_safe_transaction, tx2])
         assert len(results) == 2
+        assert results[0]["nonce"] == 100
+        assert results[1]["nonce"] == 101
 
 
 # ============================================================================
@@ -648,35 +686,41 @@ class TestIntegration:
     """Integration tests for the Safe module."""
 
     def test_full_workflow(self, sample_transaction_calls):
-        """Test complete workflow from TransactionCalls to API-ready format."""
-        # Create a batch
+        """Complete workflow from TransactionCalls → SafeTransaction → API payload.
+
+        V3 split: API payload is lean; the multisend-metadata is surfaced via the
+        separate serialize_batch_for_display helper. Both halves of the intent
+        are asserted below.
+        """
         batch = TransactionBatch(batch_number=1)
         for call in sample_transaction_calls:
             batch.add_call(call)
 
-        # Convert to SafeTransaction
         safe_tx = convert_batch_to_safe_tx(batch, chain_id=1)
-
-        # Serialize for API
         serialized = serialize_for_safe_api(safe_tx)
 
-        # Verify structure
+        # API-required fields.
         assert "to" in serialized
         assert "data" in serialized
         assert serialized["data"].startswith("0x")
-        assert serialized["_meta"]["isMultiSend"] is True
-        assert serialized["_meta"]["transactionCount"] == 3
+        assert "safeTxGas" in serialized
 
-    def test_format_and_propose(self, sample_transaction_calls):
-        """Test formatting batches and proposing."""
+        # Human-readable metadata (the V1 _meta block) now lives on the display helper.
+        display = serialize_batch_for_display(safe_tx)
+        assert display["type"] == "MultiSend"
+        assert display["operation_count"] == 3
+
+    def test_format_and_propose(self, sample_transaction_calls, monkeypatch):
+        """End-to-end: format batches and propose via the stubbed (no-key) path."""
+        monkeypatch.setenv("SAFE_PROPOSAL_START_NONCE", "0")
+        monkeypatch.delenv("PROPOSER_PRIVATE_KEY", raising=False)
+        monkeypatch.delenv("PROPOSER_ADDRESS", raising=False)
+
         batch = TransactionBatch(batch_number=1)
         for call in sample_transaction_calls:
             batch.add_call(call)
 
-        # Format as Safe transactions
         safe_txs = format_safe_batch([batch], chain_id=1)
-
-        # Create proposer and propose
         proposer = ProposeToSafe(
             safe_address="0x1111111111111111111111111111111111111111",
             chain_id=1,

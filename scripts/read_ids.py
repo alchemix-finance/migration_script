@@ -76,20 +76,27 @@ def cli(chain_name: str, asset: str, from_block: int, to_block: int | None) -> N
     click.echo(f"Querying NFT events on {nft_address} from block {from_block}...")
 
     # Connect to RPC directly (avoids needing ape provider setup)
-    alchemy_key = os.environ.get("ALCHEMY_API_KEY", "").strip()
+    alchemy_key = (
+        os.environ.get("WEB3_ALCHEMY_API_KEY")
+        or os.environ.get("ALCHEMY_API_KEY")
+        or ""
+    ).strip()
     chain_id = CHAINS[chain_name]["chain_id"]
     rpc_urls = {
         1: f"https://eth-mainnet.g.alchemy.com/v2/{alchemy_key}",
         10: f"https://opt-mainnet.g.alchemy.com/v2/{alchemy_key}",
         42161: f"https://arb-mainnet.g.alchemy.com/v2/{alchemy_key}",
     }
-    rpc_url = os.environ.get(
-        {1: "MAINNET_RPC_URL", 10: "OPTIMISM_RPC_URL", 42161: "ARBITRUM_RPC_URL"}.get(chain_id, ""),
-        "",
-    ) or rpc_urls.get(chain_id, "")
+    rpc_url = (
+        os.environ.get("FORK_RPC_URL", "")
+        or os.environ.get({1: "MAINNET_RPC_URL", 10: "OPTIMISM_RPC_URL", 42161: "ARBITRUM_RPC_URL"}.get(chain_id, ""), "")
+        or rpc_urls.get(chain_id, "")
+    )
 
-    if not rpc_url or not alchemy_key:
-        click.echo(click.style("Error: ALCHEMY_API_KEY not set in .env", fg="red"))
+    is_alchemy = "alchemy.com" in rpc_url
+
+    if not rpc_url or (is_alchemy and not alchemy_key):
+        click.echo(click.style("Error: WEB3_ALCHEMY_API_KEY (or ALCHEMY_API_KEY) not set", fg="red"))
         raise SystemExit(1)
 
     w3 = Web3(Web3.HTTPProvider(rpc_url))
@@ -106,9 +113,48 @@ def cli(chain_name: str, asset: str, from_block: int, to_block: int | None) -> N
         multisig_topic,         # to = multisig
     ]
 
+    # Non-Alchemy RPCs (e.g. local anvil fork) — use standard eth_getLogs.
+    all_logs: list = []
+    if not is_alchemy:
+        click.echo(f"  Using standard eth_getLogs against {rpc_url}")
+        logs_raw = w3.eth.get_logs({
+            "fromBlock": from_block,
+            "toBlock": end_block,
+            "address": Web3.to_checksum_address(nft_address),
+            "topics": topics,
+        })
+        for log in logs_raw:
+            token_id = int.from_bytes(log["topics"][3], "big")
+            all_logs.append({"tokenId": hex(token_id), "blockNum": log["blockNumber"], "logIndex": log["logIndex"]})
+        # Preserve (block, logIndex) order so the mapping matches deposit order.
+        all_logs.sort(key=lambda t: (t.get("blockNum", 0), t.get("logIndex", 0)))
+        logs = all_logs
+        click.echo(f"Found {len(logs)} NFT mint events")
+
+        if len(logs) != len(positions):
+            click.echo(click.style(
+                f"MISMATCH: {len(logs)} events vs {len(positions)} CSV positions",
+                fg="red",
+            ))
+            raise SystemExit(1)
+
+        token_id_map = {}
+        for transfer, position in zip(logs, positions):
+            token_id = int(transfer["tokenId"], 16)
+            token_id_map[position.user_address.lower()] = token_id
+        output_path = get_token_ids_path(chain_name, asset_type)
+        with open(output_path, "w") as f:
+            json.dump(token_id_map, f, indent=2)
+        click.echo(click.style(f"\nWrote {len(token_id_map)} token IDs to {output_path}", fg="green"))
+        items = list(token_id_map.items())
+        for addr, tid in items[:5]:
+            click.echo(f"  {addr} → tokenId {tid}")
+        if len(items) > 5:
+            click.echo(f"  ... +{len(items) - 5} more")
+        return
+
     # Use Alchemy's getAssetTransfers API to fetch all NFT mints in bulk
     # (avoids eth_getLogs block range limits on free tier)
-    all_logs = []
     page_key = None
 
     while True:

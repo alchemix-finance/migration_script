@@ -1,531 +1,388 @@
-"""Tests for CSV validation module."""
+"""Tests for CSV validation module (V3).
 
-import pytest
+V1 CSV format combined USD + ETH columns per row; V3 splits into one file per
+chain+asset with columns `address,underlyingValue,debt`. V1 exposed many
+individual helpers; V3 keeps those helpers as public exports on
+src.validation (with some renames: parse_numeric_field → parse_decimal /
+parse_non_negative_decimal; create_positions_from_row → position_from_row).
+
+These tests preserve the original intent (strict parsing, halt-on-error,
+correct wei conversion, correct position mapping) against the current API.
+"""
+
+from __future__ import annotations
+
 from decimal import Decimal
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 
+import pytest
+
+from src.types import AssetType, CSVRow, PositionMigration, ValidationError
 from src.validation import (
     CSVValidationError,
     ValidationResult,
     convert_to_wei,
-    create_positions_from_row,
     format_validation_errors,
     is_valid_eth_address,
-    parse_numeric_field,
-    validate_csv_content,
+    parse_decimal,
+    parse_non_negative_decimal,
+    position_from_row,
     validate_csv_file,
     validate_csv_string,
     validate_headers,
     validate_row,
 )
-from src.types import CSVRow, ValidationError
 
+
+# --- is_valid_eth_address --------------------------------------------------
 
 class TestIsValidEthAddress:
-    """Tests for Ethereum address validation."""
-
     def test_valid_lowercase_address(self) -> None:
-        """Test valid lowercase hex address."""
         assert is_valid_eth_address("0x1234567890abcdef1234567890abcdef12345678")
 
-    def test_valid_uppercase_address(self) -> None:
-        """Test valid uppercase hex address."""
+    def test_valid_uppercase_hex(self) -> None:
         assert is_valid_eth_address("0x1234567890ABCDEF1234567890ABCDEF12345678")
 
-    def test_valid_mixed_case_address(self) -> None:
-        """Test valid mixed case address."""
-        assert is_valid_eth_address("0xAbCdEf1234567890AbCdEf1234567890AbCdEf12")
+    def test_valid_mixed_case(self) -> None:
+        assert is_valid_eth_address("0x1234567890AbCdEf1234567890aBcDeF12345678")
 
-    def test_invalid_missing_0x_prefix(self) -> None:
-        """Test address without 0x prefix is invalid."""
+    def test_missing_0x_prefix_rejected(self) -> None:
         assert not is_valid_eth_address("1234567890abcdef1234567890abcdef12345678")
 
-    def test_invalid_short_address(self) -> None:
-        """Test address with fewer than 40 hex chars is invalid."""
-        assert not is_valid_eth_address("0x123456789012345678901234567890123456789")
+    def test_wrong_length_rejected(self) -> None:
+        assert not is_valid_eth_address("0x1234")
+        assert not is_valid_eth_address("0x" + "a" * 41)
 
-    def test_invalid_long_address(self) -> None:
-        """Test address with more than 40 hex chars is invalid."""
-        assert not is_valid_eth_address("0x12345678901234567890123456789012345678901")
+    def test_non_hex_rejected(self) -> None:
+        assert not is_valid_eth_address("0xZZZZ567890abcdef1234567890abcdef12345678")
 
-    def test_invalid_non_hex_chars(self) -> None:
-        """Test address with non-hex characters is invalid."""
-        assert not is_valid_eth_address("0x123456789012345678901234567890123456789g")
-
-    def test_invalid_empty_string(self) -> None:
-        """Test empty string is invalid."""
+    def test_empty_rejected(self) -> None:
         assert not is_valid_eth_address("")
 
-    def test_invalid_only_prefix(self) -> None:
-        """Test only 0x prefix is invalid."""
-        assert not is_valid_eth_address("0x")
+
+# --- parse_decimal / parse_non_negative_decimal ---------------------------
+
+class TestParseDecimal:
+    def test_positive_integer(self) -> None:
+        assert parse_decimal("1000", "debt", 1) == Decimal("1000")
+
+    def test_positive_fractional(self) -> None:
+        assert parse_decimal("1000.5", "debt", 1) == Decimal("1000.5")
+
+    def test_zero(self) -> None:
+        assert parse_decimal("0", "debt", 1) == Decimal("0")
+
+    def test_negative(self) -> None:
+        # parse_decimal allows negatives (debt < 0 is a credit user).
+        assert parse_decimal("-25.0", "debt", 1) == Decimal("-25.0")
+
+    def test_whitespace_stripped(self) -> None:
+        assert parse_decimal("  1000  ", "debt", 1) == Decimal("1000")
+
+    def test_empty_rejected(self) -> None:
+        with pytest.raises(CSVValidationError) as excinfo:
+            parse_decimal("", "debt", 5)
+        assert excinfo.value.error.row_number == 5
+        assert excinfo.value.error.field_name == "debt"
+
+    def test_non_numeric_rejected(self) -> None:
+        with pytest.raises(CSVValidationError) as excinfo:
+            parse_decimal("abc", "debt", 5)
+        assert "Invalid numeric value" in excinfo.value.error.message
 
 
-class TestParseNumericField:
-    """Tests for numeric field parsing."""
+class TestParseNonNegativeDecimal:
+    def test_positive_accepted(self) -> None:
+        assert parse_non_negative_decimal("500.0", "underlyingValue", 1) == Decimal("500.0")
 
-    def test_valid_integer(self) -> None:
-        """Test parsing valid integer."""
-        result = parse_numeric_field("1000", "test_field", 1)
-        assert result == Decimal("1000")
+    def test_zero_accepted(self) -> None:
+        assert parse_non_negative_decimal("0", "underlyingValue", 1) == Decimal("0")
 
-    def test_valid_decimal(self) -> None:
-        """Test parsing valid decimal."""
-        result = parse_numeric_field("1000.50", "test_field", 1)
-        assert result == Decimal("1000.50")
+    def test_negative_rejected(self) -> None:
+        with pytest.raises(CSVValidationError) as excinfo:
+            parse_non_negative_decimal("-1", "underlyingValue", 3)
+        assert excinfo.value.error.row_number == 3
 
-    def test_valid_zero(self) -> None:
-        """Test parsing zero."""
-        result = parse_numeric_field("0", "test_field", 1)
-        assert result == Decimal("0")
 
-    def test_valid_with_whitespace(self) -> None:
-        """Test parsing value with whitespace."""
-        result = parse_numeric_field("  100.5  ", "test_field", 1)
-        assert result == Decimal("100.5")
-
-    def test_invalid_negative(self) -> None:
-        """Test negative value raises error."""
-        with pytest.raises(CSVValidationError) as exc_info:
-            parse_numeric_field("-100", "test_field", 5)
-        assert exc_info.value.error.row_number == 5
-        assert exc_info.value.error.field_name == "test_field"
-        assert "non-negative" in exc_info.value.error.message
-
-    def test_invalid_non_numeric(self) -> None:
-        """Test non-numeric value raises error."""
-        with pytest.raises(CSVValidationError) as exc_info:
-            parse_numeric_field("abc", "test_field", 3)
-        assert exc_info.value.error.row_number == 3
-        assert "Invalid numeric" in exc_info.value.error.message
-
-    def test_invalid_empty(self) -> None:
-        """Test empty value raises error."""
-        with pytest.raises(CSVValidationError) as exc_info:
-            parse_numeric_field("", "test_field", 2)
-        assert exc_info.value.error.row_number == 2
-        assert "empty or missing" in exc_info.value.error.message
-
+# --- validate_headers -----------------------------------------------------
 
 class TestValidateHeaders:
-    """Tests for header validation."""
+    def test_all_present_returns_empty(self) -> None:
+        assert validate_headers(["address", "underlyingValue", "debt"]) == []
 
-    def test_valid_headers(self) -> None:
-        """Test all required headers present."""
-        headers = [
-            "address",
-            "USD_debt",
-            "USD_underlyingValue",
-            "ETH_debt",
-            "ETH_underlyingValue",
-        ]
-        errors = validate_headers(headers)
-        assert len(errors) == 0
+    def test_order_does_not_matter(self) -> None:
+        assert validate_headers(["debt", "address", "underlyingValue"]) == []
 
-    def test_valid_headers_with_extra_whitespace(self) -> None:
-        """Test headers with whitespace are handled."""
-        headers = [
-            " address ",
-            " USD_debt",
-            "USD_underlyingValue ",
-            "ETH_debt",
-            "ETH_underlyingValue",
-        ]
-        errors = validate_headers(headers)
-        assert len(errors) == 0
+    def test_extra_columns_tolerated(self) -> None:
+        assert validate_headers(["address", "underlyingValue", "debt", "extra"]) == []
 
-    def test_missing_single_header(self) -> None:
-        """Test single missing header is detected."""
-        headers = [
-            "address",
-            "USD_debt",
-            "ETH_debt",
-            "ETH_underlyingValue",
-        ]
-        errors = validate_headers(headers)
+    def test_missing_column_reported(self) -> None:
+        errors = validate_headers(["address", "underlyingValue"])
         assert len(errors) == 1
-        assert errors[0].field_name == "USD_underlyingValue"
+        assert errors[0].field_name == "debt"
 
-    def test_missing_multiple_headers(self) -> None:
-        """Test multiple missing headers are detected."""
-        headers = ["address", "USD_debt"]
-        errors = validate_headers(headers)
-        assert len(errors) == 3
+    def test_whitespace_stripped_in_headers(self) -> None:
+        assert validate_headers([" address ", "underlyingValue", " debt"]) == []
+
+
+# --- validate_row ---------------------------------------------------------
+
+VALID_ADDR = "0x1234567890abcdef1234567890abcdef12345678"
 
 
 class TestValidateRow:
-    """Tests for individual row validation."""
+    def _row(self, **kwargs) -> dict[str, str]:
+        base = {"address": VALID_ADDR, "underlyingValue": "100", "debt": "50"}
+        base.update(kwargs)
+        return base
 
-    def test_valid_row_both_positions(self) -> None:
-        """Test valid row with both USD and ETH positions."""
-        row = {
-            "address": "0x1234567890123456789012345678901234567890",
-            "USD_debt": "1000.50",
-            "USD_underlyingValue": "5000.00",
-            "ETH_debt": "0.5",
-            "ETH_underlyingValue": "2.0",
-        }
-        result = validate_row(row, 1)
-        assert result.address == "0x1234567890123456789012345678901234567890"
-        assert result.usd_debt == 1000.50
-        assert result.usd_underlying_value == 5000.00
-        assert result.eth_debt == 0.5
-        assert result.eth_underlying_value == 2.0
-        assert result.row_number == 1
+    def test_valid_row_returns_csvrow(self) -> None:
+        out = validate_row(self._row(), 1)
+        assert isinstance(out, CSVRow)
+        assert out.address == VALID_ADDR
+        assert out.underlying_value == Decimal("100")
+        assert out.debt == Decimal("50")
+        assert out.row_number == 1
 
-    def test_valid_row_usd_only(self) -> None:
-        """Test valid row with only USD position."""
-        row = {
-            "address": "0x1234567890123456789012345678901234567890",
-            "USD_debt": "1000.00",
-            "USD_underlyingValue": "5000.00",
-            "ETH_debt": "0",
-            "ETH_underlyingValue": "0",
-        }
-        result = validate_row(row, 1)
-        assert result.has_usd_position
-        assert not result.has_eth_position
+    def test_empty_address_rejected(self) -> None:
+        with pytest.raises(CSVValidationError) as excinfo:
+            validate_row(self._row(address=""), 7)
+        assert excinfo.value.error.field_name == "address"
 
-    def test_valid_row_eth_only(self) -> None:
-        """Test valid row with only ETH position."""
-        row = {
-            "address": "0x1234567890123456789012345678901234567890",
-            "USD_debt": "0",
-            "USD_underlyingValue": "0",
-            "ETH_debt": "0.5",
-            "ETH_underlyingValue": "2.0",
-        }
-        result = validate_row(row, 1)
-        assert not result.has_usd_position
-        assert result.has_eth_position
+    def test_invalid_address_rejected(self) -> None:
+        with pytest.raises(CSVValidationError) as excinfo:
+            validate_row(self._row(address="0xdeadbeef"), 7)
+        assert "Invalid Ethereum address" in excinfo.value.error.message
 
-    def test_invalid_address_empty(self) -> None:
-        """Test empty address raises error."""
-        row = {
-            "address": "",
-            "USD_debt": "1000",
-            "USD_underlyingValue": "5000",
-            "ETH_debt": "0",
-            "ETH_underlyingValue": "0",
-        }
-        with pytest.raises(CSVValidationError) as exc_info:
-            validate_row(row, 3)
-        assert exc_info.value.error.field_name == "address"
-        assert exc_info.value.error.row_number == 3
+    def test_zero_underlying_rejected(self) -> None:
+        with pytest.raises(CSVValidationError) as excinfo:
+            validate_row(self._row(underlyingValue="0"), 3)
+        assert "must be > 0" in excinfo.value.error.message
 
-    def test_invalid_address_format(self) -> None:
-        """Test invalid address format raises error."""
-        row = {
-            "address": "not_an_address",
-            "USD_debt": "1000",
-            "USD_underlyingValue": "5000",
-            "ETH_debt": "0",
-            "ETH_underlyingValue": "0",
-        }
-        with pytest.raises(CSVValidationError) as exc_info:
-            validate_row(row, 2)
-        assert exc_info.value.error.field_name == "address"
-        assert "0x + 40 hex" in exc_info.value.error.message
+    def test_negative_underlying_rejected(self) -> None:
+        with pytest.raises(CSVValidationError) as excinfo:
+            validate_row(self._row(underlyingValue="-5"), 3)
+        assert excinfo.value.error.field_name == "underlyingValue"
 
-    def test_invalid_no_positions(self) -> None:
-        """Test row with no positions raises error."""
-        row = {
-            "address": "0x1234567890123456789012345678901234567890",
-            "USD_debt": "0",
-            "USD_underlyingValue": "0",
-            "ETH_debt": "0",
-            "ETH_underlyingValue": "0",
-        }
-        with pytest.raises(CSVValidationError) as exc_info:
-            validate_row(row, 5)
-        assert "at least one position" in exc_info.value.error.message.lower()
+    def test_negative_debt_accepted_as_credit(self) -> None:
+        out = validate_row(self._row(debt="-20"), 1)
+        assert out.debt == Decimal("-20")
+        assert out.is_credit_user is True
 
-    def test_invalid_negative_debt(self) -> None:
-        """Test negative debt raises error."""
-        row = {
-            "address": "0x1234567890123456789012345678901234567890",
-            "USD_debt": "-100",
-            "USD_underlyingValue": "5000",
-            "ETH_debt": "0",
-            "ETH_underlyingValue": "0",
-        }
-        with pytest.raises(CSVValidationError) as exc_info:
-            validate_row(row, 1)
-        assert exc_info.value.error.field_name == "USD_debt"
 
+# --- convert_to_wei -------------------------------------------------------
 
 class TestConvertToWei:
-    """Tests for wei conversion."""
+    def test_18_decimal_default(self) -> None:
+        assert convert_to_wei(Decimal("1")) == 10**18
 
-    def test_convert_integer(self) -> None:
-        """Test converting integer value to wei."""
-        result = convert_to_wei(1.0)
-        assert result == 1_000_000_000_000_000_000
+    def test_fractional(self) -> None:
+        assert convert_to_wei(Decimal("1.5")) == 15 * 10**17
 
-    def test_convert_decimal(self) -> None:
-        """Test converting decimal value to wei."""
-        result = convert_to_wei(0.5)
-        assert result == 500_000_000_000_000_000
+    def test_zero(self) -> None:
+        assert convert_to_wei(Decimal(0)) == 0
 
-    def test_convert_zero(self) -> None:
-        """Test converting zero."""
-        result = convert_to_wei(0.0)
-        assert result == 0
+    def test_6_decimal_scale(self) -> None:
+        assert convert_to_wei(Decimal("1"), decimals=6) == 10**6
 
-    def test_convert_large_value(self) -> None:
-        """Test converting large value."""
-        result = convert_to_wei(1000000.0)
-        assert result == 1_000_000_000_000_000_000_000_000
+    def test_negative(self) -> None:
+        assert convert_to_wei(Decimal("-1")) == -10**18
 
 
-class TestCreatePositionsFromRow:
-    """Tests for position creation from CSV rows."""
+# --- position_from_row ----------------------------------------------------
 
-    def test_create_both_positions(self) -> None:
-        """Test creating both USD and ETH positions."""
-        row = CSVRow(
-            address="0x1234567890123456789012345678901234567890",
-            usd_debt=1000.0,
-            usd_underlying_value=5000.0,
-            eth_debt=0.5,
-            eth_underlying_value=2.0,
+class TestPositionFromRow:
+    def _csv_row(self, *, debt: str, underlying: str = "100") -> CSVRow:
+        return CSVRow(
+            address=VALID_ADDR,
+            underlying_value=Decimal(underlying),
+            debt=Decimal(debt),
             row_number=1,
         )
-        positions, new_usd_id, new_eth_id = create_positions_from_row(
-            row, "mainnet", 0, 0
-        )
-        assert len(positions) == 2
-        assert new_usd_id == 1
-        assert new_eth_id == 1
 
-        usd_pos = positions[0]
-        assert usd_pos.asset_type == "USD"
-        assert usd_pos.token_id == 0
-        assert usd_pos.deposit_amount == convert_to_wei(5000.0)
-        assert usd_pos.mint_amount == convert_to_wei(1000.0)
+    def test_debt_user(self) -> None:
+        pos = position_from_row(self._csv_row(debt="50"), "mainnet", AssetType.USD)
+        assert pos.user_address == VALID_ADDR
+        assert pos.deposit_amount_wei == 100
+        assert pos.mint_amount_wei == 50
+        assert pos.credit_amount_wei == 0
+        assert pos.is_debt_user is True
 
-        eth_pos = positions[1]
-        assert eth_pos.asset_type == "ETH"
-        assert eth_pos.token_id == 0
+    def test_credit_user(self) -> None:
+        pos = position_from_row(self._csv_row(debt="-25"), "mainnet", AssetType.USD)
+        assert pos.mint_amount_wei == 0
+        assert pos.credit_amount_wei == 25
+        assert pos.is_credit_user is True
 
-    def test_create_usd_only(self) -> None:
-        """Test creating only USD position."""
-        row = CSVRow(
-            address="0x1234567890123456789012345678901234567890",
-            usd_debt=1000.0,
-            usd_underlying_value=5000.0,
-            eth_debt=0.0,
-            eth_underlying_value=0.0,
-            row_number=1,
-        )
-        positions, new_usd_id, new_eth_id = create_positions_from_row(
-            row, "mainnet", 5, 3
-        )
-        assert len(positions) == 1
-        assert new_usd_id == 6
-        assert new_eth_id == 3  # Unchanged
-        assert positions[0].token_id == 5
+    def test_zero_debt(self) -> None:
+        pos = position_from_row(self._csv_row(debt="0"), "mainnet", AssetType.USD)
+        assert pos.mint_amount_wei == 0
+        assert pos.credit_amount_wei == 0
+        assert pos.is_debt_user is False
 
-    def test_create_eth_only(self) -> None:
-        """Test creating only ETH position."""
-        row = CSVRow(
-            address="0x1234567890123456789012345678901234567890",
-            usd_debt=0.0,
-            usd_underlying_value=0.0,
-            eth_debt=0.5,
-            eth_underlying_value=2.0,
-            row_number=1,
-        )
-        positions, new_usd_id, new_eth_id = create_positions_from_row(
-            row, "mainnet", 5, 3
-        )
-        assert len(positions) == 1
-        assert new_usd_id == 5  # Unchanged
-        assert new_eth_id == 4
-        assert positions[0].token_id == 3
+    def test_myt_decimals_rescales_deposit(self) -> None:
+        # 18-dec input → 6-dec vault: divide by 10^12.
+        row = self._csv_row(debt="0", underlying=str(5 * 10**18))
+        pos_18 = position_from_row(row, "mainnet", AssetType.USD, myt_decimals=18)
+        pos_6 = position_from_row(row, "mainnet", AssetType.USD, myt_decimals=6)
+        assert pos_18.deposit_amount_wei == 5 * 10**18
+        assert pos_6.deposit_amount_wei == 5 * 10**6
+        assert pos_18.deposit_amount_wei // pos_6.deposit_amount_wei == 10**12
 
+    def test_debt_is_not_rescaled_by_myt_decimals(self) -> None:
+        # alAssets are always 18-decimal — debt amount must pass through regardless of myt_decimals.
+        row = self._csv_row(debt="1000", underlying=str(10**18))
+        pos = position_from_row(row, "mainnet", AssetType.USD, myt_decimals=6)
+        assert pos.mint_amount_wei == 1000  # NOT rescaled
+
+    def test_chain_propagated(self) -> None:
+        pos = position_from_row(self._csv_row(debt="1"), "arbitrum", AssetType.ETH)
+        assert pos.chain == "arbitrum"
+        assert pos.asset_type == AssetType.ETH
+
+
+# --- validate_csv_string --------------------------------------------------
 
 class TestValidateCsvString:
-    """Tests for full CSV validation."""
+    def _csv(self, rows: str) -> str:
+        return "address,underlyingValue,debt\n" + rows
 
-    def test_valid_csv(self) -> None:
-        """Test validating a valid CSV."""
-        csv_content = """address,USD_debt,USD_underlyingValue,ETH_debt,ETH_underlyingValue
-0xAAA0000000000000000000000000000000000001,1000.50,5000.00,0.5,2.0
-0xBBB0000000000000000000000000000000000002,0,0,1.5,3.0
-0xCCC0000000000000000000000000000000000003,3000.00,15000.00,0,0
-"""
-        result = validate_csv_string(csv_content, "mainnet")
+    def test_valid_multi_row(self) -> None:
+        csv_content = self._csv(
+            f"{VALID_ADDR},100,50\n"
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,200,-30\n"
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,300,0\n"
+        )
+        result = validate_csv_string(csv_content, "mainnet", AssetType.USD)
         assert result.is_valid
-        assert len(result.rows) == 3
-        assert len(result.positions) == 4  # 2 USD + 2 ETH
-        assert result.usd_token_count == 2
-        assert result.eth_token_count == 2
+        assert len(result.positions) == 3
+        assert result.debt_count == 1
+        assert result.credit_count == 1
+        assert result.zero_debt_count == 1
+        assert result.total_positions == 3
 
-    def test_token_id_assignment(self) -> None:
-        """Test that token IDs are assigned correctly."""
-        csv_content = """address,USD_debt,USD_underlyingValue,ETH_debt,ETH_underlyingValue
-0xAAA0000000000000000000000000000000000001,1000,5000,0.5,2.0
-0xBBB0000000000000000000000000000000000002,0,0,1.5,3.0
-0xCCC0000000000000000000000000000000000003,3000,15000,0,0
-"""
-        result = validate_csv_string(csv_content, "mainnet")
-        assert result.is_valid
-
-        # Check USD token IDs
-        usd_positions = [p for p in result.positions if p.asset_type == "USD"]
-        assert len(usd_positions) == 2
-        assert usd_positions[0].token_id == 0  # Row 1
-        assert usd_positions[1].token_id == 1  # Row 3
-
-        # Check ETH token IDs
-        eth_positions = [p for p in result.positions if p.asset_type == "ETH"]
-        assert len(eth_positions) == 2
-        assert eth_positions[0].token_id == 0  # Row 1
-        assert eth_positions[1].token_id == 1  # Row 2
-
-    def test_empty_csv(self) -> None:
-        """Test validating an empty CSV."""
-        csv_content = ""
-        result = validate_csv_string(csv_content, "mainnet")
-        assert not result.is_valid
-        assert any("empty" in str(e).lower() for e in result.errors)
-
-    def test_missing_header(self) -> None:
-        """Test CSV with missing header column."""
-        csv_content = """address,USD_debt,ETH_debt,ETH_underlyingValue
-0xAAA0000000000000000000000000000000000001,1000,0.5,2.0
-"""
-        result = validate_csv_string(csv_content, "mainnet")
-        assert not result.is_valid
-        assert any("USD_underlyingValue" in str(e) for e in result.errors)
+    def test_totals_sum_rows(self) -> None:
+        csv_content = self._csv(
+            f"{VALID_ADDR},100,50\n"
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,200,-30\n"
+        )
+        result = validate_csv_string(csv_content, "mainnet", AssetType.USD)
+        assert result.total_deposit_wei == 300
+        assert result.total_mint_wei == 50
+        assert result.total_credit_wei == 30
 
     def test_invalid_address_halts(self) -> None:
-        """Test that invalid address halts processing."""
-        csv_content = """address,USD_debt,USD_underlyingValue,ETH_debt,ETH_underlyingValue
-0xAAA0000000000000000000000000000000000001,1000,5000,0.5,2.0
-invalid_address,1000,5000,0.5,2.0
-0xCCC0000000000000000000000000000000000003,3000,15000,0,0
-"""
-        result = validate_csv_string(csv_content, "mainnet")
+        csv_content = self._csv(
+            f"{VALID_ADDR},100,50\n"
+            "0xdeadbeef,200,10\n"
+        )
+        result = validate_csv_string(csv_content, "mainnet", AssetType.USD)
         assert not result.is_valid
-        assert len(result.errors) == 1  # Only first error
+        assert len(result.errors) == 1
         assert result.errors[0].row_number == 2
 
-    def test_duplicate_address(self) -> None:
-        """Test that duplicate address is detected."""
-        csv_content = """address,USD_debt,USD_underlyingValue,ETH_debt,ETH_underlyingValue
-0xAAA0000000000000000000000000000000000001,1000,5000,0.5,2.0
-0xAAA0000000000000000000000000000000000001,2000,6000,0.6,3.0
-"""
-        result = validate_csv_string(csv_content, "mainnet")
+    def test_duplicate_address_halts(self) -> None:
+        csv_content = self._csv(
+            f"{VALID_ADDR},100,50\n"
+            f"{VALID_ADDR},200,10\n"
+        )
+        result = validate_csv_string(csv_content, "mainnet", AssetType.USD)
         assert not result.is_valid
-        assert result.errors[0].row_number == 2
-        assert "duplicate" in result.errors[0].message.lower()
+        assert "Duplicate address" in result.errors[0].message
 
-    def test_duplicate_address_case_insensitive(self) -> None:
-        """Test that duplicate detection is case-insensitive."""
-        csv_content = """address,USD_debt,USD_underlyingValue,ETH_debt,ETH_underlyingValue
-0xAAA0000000000000000000000000000000000001,1000,5000,0.5,2.0
-0xaaa0000000000000000000000000000000000001,2000,6000,0.6,3.0
-"""
-        result = validate_csv_string(csv_content, "mainnet")
+    def test_missing_header_column_halts(self) -> None:
+        csv_content = "address,underlyingValue\n" + f"{VALID_ADDR},100\n"
+        result = validate_csv_string(csv_content, "mainnet", AssetType.USD)
         assert not result.is_valid
-        assert "duplicate" in result.errors[0].message.lower()
+        assert any(e.field_name == "debt" for e in result.errors)
 
-    def test_negative_value_halts(self) -> None:
-        """Test that negative value halts processing."""
-        csv_content = """address,USD_debt,USD_underlyingValue,ETH_debt,ETH_underlyingValue
-0xAAA0000000000000000000000000000000000001,-1000,5000,0.5,2.0
-"""
-        result = validate_csv_string(csv_content, "mainnet")
+    def test_empty_csv_halts(self) -> None:
+        result = validate_csv_string("", "mainnet", AssetType.USD)
         assert not result.is_valid
-        assert result.errors[0].field_name == "USD_debt"
+        assert result.errors[0].field_name == "header"
 
-    def test_no_positions_halts(self) -> None:
-        """Test that row with no positions halts processing."""
-        csv_content = """address,USD_debt,USD_underlyingValue,ETH_debt,ETH_underlyingValue
-0xAAA0000000000000000000000000000000000001,0,0,0,0
-"""
-        result = validate_csv_string(csv_content, "mainnet")
+    def test_negative_underlying_halts(self) -> None:
+        csv_content = self._csv(f"{VALID_ADDR},-100,50\n")
+        result = validate_csv_string(csv_content, "mainnet", AssetType.USD)
         assert not result.is_valid
-        assert "at least one position" in result.errors[0].message.lower()
+        assert result.errors[0].field_name == "underlyingValue"
 
+
+# --- validate_csv_file ----------------------------------------------------
 
 class TestValidateCsvFile:
-    """Tests for file-based CSV validation."""
-
-    def test_file_not_found(self, tmp_path: Path) -> None:
-        """Test validation of non-existent file."""
-        result = validate_csv_file(tmp_path / "nonexistent.csv", "mainnet")
+    def test_missing_file(self, tmp_path: Path) -> None:
+        result = validate_csv_file(tmp_path / "nonexistent.csv", "mainnet", AssetType.USD)
         assert not result.is_valid
-        assert "not found" in result.errors[0].message.lower()
+        assert "not found" in result.errors[0].message
 
-    def test_valid_file(self, tmp_path: Path) -> None:
-        """Test validation of valid CSV file."""
-        csv_content = """address,USD_debt,USD_underlyingValue,ETH_debt,ETH_underlyingValue
-0xAAA0000000000000000000000000000000000001,1000,5000,0.5,2.0
-"""
-        csv_file = tmp_path / "test.csv"
-        csv_file.write_text(csv_content)
-
-        result = validate_csv_file(csv_file, "mainnet")
+    def test_valid_file_loads(self, write_csv) -> None:
+        csv_content = (
+            "address,underlyingValue,debt\n"
+            f"{VALID_ADDR},100,50\n"
+        )
+        path = write_csv(csv_content, name="single.csv")
+        result = validate_csv_file(path, "mainnet", AssetType.USD)
         assert result.is_valid
-        assert len(result.rows) == 1
+        assert len(result.positions) == 1
+        assert result.positions[0].chain == "mainnet"
+        assert result.positions[0].asset_type == AssetType.USD
 
+    def test_real_csv_files_parse(self, project_root: Path) -> None:
+        """Lock in: all 6 committed CSVs parse cleanly. Covers the multi-chain matrix."""
+        targets = [
+            ("mainnet", AssetType.USD, "alUSDValues-sum-and-debt-mainnet.csv"),
+            ("mainnet", AssetType.ETH, "alETHValues-sum-and-debt-mainnet.csv"),
+            ("optimism", AssetType.USD, "alUSDValues-sum-and-debt-optimism.csv"),
+            ("optimism", AssetType.ETH, "alETHValues-sum-and-debt-optimism.csv"),
+            ("arbitrum", AssetType.USD, "alUSDValues-sum-and-debt-arbitrum.csv"),
+            ("arbitrum", AssetType.ETH, "alETHValues-sum-and-debt-arbitrum.csv"),
+        ]
+        for chain, asset, fname in targets:
+            path = project_root / "data" / fname
+            assert path.exists(), f"missing CSV: {fname}"
+            result = validate_csv_file(path, chain, asset)
+            assert result.is_valid, f"{fname} failed validation: {result.errors[:3]}"
+            assert result.total_positions > 0
+
+
+# --- format_validation_errors --------------------------------------------
 
 class TestFormatValidationErrors:
-    """Tests for error formatting."""
+    def test_empty_list(self) -> None:
+        assert format_validation_errors([]) == "No validation errors."
 
-    def test_no_errors(self) -> None:
-        """Test formatting with no errors."""
-        result = format_validation_errors([])
-        assert "No validation errors" in result
-
-    def test_single_error(self) -> None:
-        """Test formatting single error."""
-        errors = [
-            ValidationError(
-                row_number=5,
-                field_name="address",
-                message="Invalid format",
-                value="bad",
-            )
-        ]
-        result = format_validation_errors(errors)
-        assert "CSV Validation Failed" in result
-        assert "Row 5" in result
-        assert "address" in result
+    def test_single_error_formatted(self) -> None:
+        errors = [ValidationError(row_number=3, field_name="address", message="Invalid")]
+        text = format_validation_errors(errors)
+        assert "Row 3" in text
+        assert "address" in text
+        assert "Invalid" in text
 
     def test_multiple_errors(self) -> None:
-        """Test formatting multiple errors."""
         errors = [
-            ValidationError(row_number=1, field_name="field1", message="Error 1"),
-            ValidationError(row_number=2, field_name="field2", message="Error 2"),
+            ValidationError(row_number=1, field_name="address", message="err1"),
+            ValidationError(row_number=2, field_name="debt", message="err2"),
         ]
-        result = format_validation_errors(errors)
-        assert "Row 1" in result
-        assert "Row 2" in result
+        text = format_validation_errors(errors)
+        assert "err1" in text
+        assert "err2" in text
 
 
-class TestValidationResult:
-    """Tests for ValidationResult dataclass."""
+# --- ValidationResult properties -----------------------------------------
 
-    def test_is_valid_true(self) -> None:
-        """Test is_valid when no errors."""
-        result = ValidationResult()
-        assert result.is_valid
+class TestValidationResultProperties:
+    def test_is_valid_when_no_errors(self) -> None:
+        r = ValidationResult()
+        assert r.is_valid
 
-    def test_is_valid_false(self) -> None:
-        """Test is_valid when errors present."""
-        result = ValidationResult()
-        result.errors.append(
-            ValidationError(row_number=1, field_name="test", message="error")
-        )
-        assert not result.is_valid
+    def test_is_valid_false_when_errors(self) -> None:
+        r = ValidationResult()
+        r.errors.append(ValidationError(0, "f", "m"))
+        assert not r.is_valid
 
-    def test_total_positions(self) -> None:
-        """Test total_positions calculation."""
-        result = ValidationResult()
-        assert result.total_positions == 0
+    def test_total_positions_matches_list(self, make_position) -> None:
+        r = ValidationResult()
+        r.positions.append(make_position())
+        r.positions.append(make_position())
+        assert r.total_positions == 2

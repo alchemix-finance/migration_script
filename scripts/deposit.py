@@ -1,6 +1,6 @@
 import src.env  # Load .env on startup
 #!/usr/bin/env python3
-"""Step 1: Deposit MYT and create NFT positions (no mint).
+"""Phase 1: Deposit MYT and create NFT positions (no mint).
 
 Usage:
     ape run deposit --chain mainnet --asset usd
@@ -30,7 +30,8 @@ from src.gas import (
     format_batch_summary,
     verify_batch_gas_limits,
 )
-from src.safe import ProposeToSafe, format_safe_batch
+from src.executor import make_executor
+from src.safe import ProposeToSafe, format_safe_batch  # ProposeToSafe kept for legacy --mode propose path
 from src.types import AssetType
 from src.validation import format_validation_errors, validate_csv_file
 
@@ -42,6 +43,8 @@ from src.validation import format_validation_errors, validate_csv_file
 @click.option("--yes", "-y", is_flag=True, default=False)
 @click.option("--dry-run", is_flag=True, default=False)
 @click.option("--skip-validation", is_flag=True, default=False)
+@click.option("--mode", type=click.Choice(["json", "impersonate", "propose"]), default="json",
+              help="json=emit Safe Builder JSON; impersonate=fork execute; propose=legacy API")
 @ape_cli_context()
 def cli(
     cli_ctx,
@@ -51,6 +54,7 @@ def cli(
     yes: bool,
     dry_run: bool,
     skip_validation: bool,
+    mode: str,
 ) -> None:
     """Step 1: Deposit MYT to create NFT positions (minting is separate)."""
     asset_type = AssetType.USD if asset == "usd" else AssetType.ETH
@@ -196,7 +200,10 @@ def cli(
 
     chain_id = chain_config["chain_id"]
     safe_txs = format_safe_batch(batches, chain_id=chain_id)
-    proposer = ProposeToSafe(safe_address=multisig, chain_id=chain_id)
+    proposer = make_executor(
+        mode, batches=batches, safe_address=multisig, chain_id=chain_id,
+        chain=chain, asset_type=asset_type, step_name="deposit",
+    )
 
     # Checkpoint mode: propose one batch at a time; pause for verification before each next batch.
     all_results: list = []

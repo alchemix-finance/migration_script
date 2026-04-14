@@ -37,7 +37,8 @@ Copy `.env.example` to `.env` and fill in three things:
 
 ```bash
 # Get from https://dashboard.alchemy.com/
-ALCHEMY_API_KEY=your_alchemy_api_key
+# Can also be exported system-wide; the ape-alchemy plugin reads this name natively.
+WEB3_ALCHEMY_API_KEY=your_alchemy_api_key
 
 # The private key of the proposer account (must be a Safe owner on each multisig)
 # 64 hex chars, no 0x prefix

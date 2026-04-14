@@ -63,6 +63,8 @@ GAS_DEPOSIT = 175_000               # deposit(amount, multisig, 0) — mints NFT
 GAS_MINT = 130_000                  # mint(tokenId, amount, multisig) — mints alAssets
 GAS_TRANSFER_ALTOKEN = 65_000       # alToken.transfer(user, amount) — send credit to user
 GAS_TRANSFER_NFT = 70_000           # ERC721.transferFrom(multisig, user, tokenId)
+GAS_ERC20_APPROVE = 55_000          # ERC20.approve(spender, amount) — standard allowance set
+GAS_ERC4626_DEPOSIT = 180_000       # ERC4626.deposit(assets, receiver) — MYT share mint
 
 # Large position surcharge (> 1000 tokens in wei)
 LARGE_POSITION_THRESHOLD = 10 ** 21
@@ -93,7 +95,7 @@ CHAINS: dict[str, ChainConfig] = {
             "alchemist": "0xeB83112d925268BeDe86654C13D423a987587e3E",
             "myt": "0x9B44efCa3e2a707B63Dc00CE79d646E5E5D24bA5",
             "al_token": "0xBC6DA0FE9aD5f3b0d58160288917AA56653660E9",
-            "underlying": "",
+            "underlying": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",  # USDC mainnet
             "nft": "0x872a03FabC86b59c883CD9c439E969321b719bEB",
             "myt_decimals": 18,
         },
@@ -101,7 +103,7 @@ CHAINS: dict[str, ChainConfig] = {
             "alchemist": "0xfa995B6ABc387376C3e7De5f6d394Ab5B6beE26B",
             "myt": "0x29bcfeD246ce37319d94eBa107db90C453D4c43D",
             "al_token": "0x0100546F2cD4C9D97f798fFC9755E47865FF7Ee6",
-            "underlying": "",
+            "underlying": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",  # WETH mainnet
             "nft": "0x15da4c7db6404b92894d5214FAc92057Fb8a263d",
             "myt_decimals": 18,
         },
@@ -113,7 +115,7 @@ CHAINS: dict[str, ChainConfig] = {
             "alchemist": "0x930750a3510E703535e943E826ABa3c364fFC1De",
             "myt": "0xAf510a560744880410f0f65e3341A020FBC2cA41",
             "al_token": "0xCB8FA9a76b8e203D8C3797bF438d8FB81Ea3326A",
-            "underlying": "",
+            "underlying": "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",  # USDC optimism
             "nft": "0xF700c7e40efCA6f7a810e172AFCee3592ff4aD33",
             "myt_decimals": 18,
         },
@@ -121,7 +123,7 @@ CHAINS: dict[str, ChainConfig] = {
             "alchemist": "0xDeD3A04612FF12b57317abE38e68026Fc9D28114",
             "myt": "0x91b8657aea26Caa8A0E9D6DD4E24727Ccf32F822",
             "al_token": "0x3E29D3A9316dAB217754d13b28646B76607c5f04",
-            "underlying": "",
+            "underlying": "0x4200000000000000000000000000000000000006",  # WETH optimism
             "nft": "0x763F5d567403add750e13234DB896CFe6b423059",
             "myt_decimals": 18,
         },
@@ -133,7 +135,7 @@ CHAINS: dict[str, ChainConfig] = {
             "alchemist": "0x930750a3510E703535e943E826ABa3c364fFC1De",
             "myt": "0xEba62B842081CeF5a8184318Dc5C4E4aACa9f651",
             "al_token": "0xCB8FA9a76b8e203D8C3797bF438d8FB81Ea3326A",
-            "underlying": "0xEba62B842081CeF5a8184318Dc5C4E4aACa9f651",
+            "underlying": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",  # USDC arbitrum (was incorrectly set to MYT)
             "nft": "0xF700c7e40efCA6f7a810e172AFCee3592ff4aD33",
             "myt_decimals": 18,
         },
