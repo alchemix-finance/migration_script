@@ -1,0 +1,21 @@
+{
+  "version": "1.0",
+  "chainId": "42161",
+  "createdAt": 1776194604256,
+  "meta": {
+    "name": "arbitrum_alUSD_approve_underlying_batch1",
+    "description": "approve_underlying \u2014 batch 1 (1 calls)",
+    "txBuilderVersion": "1.17.0",
+    "createdFromSafeAddress": "0xeE1Aa1C3D0622fCeD823c7720cf9E8079558484b",
+    "createdFromOwnerAddress": ""
+  },
+  "transactions": [
+    {
+      "to": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+      "value": "0",
+      "data": "0x095ea7b3000000000000000000000000eba62b842081cef5a8184318dc5c4e4aaca9f65100000000000000000000000000000000000000000000000000000010b790945e",
+      "contractMethod": null,
+      "contractInputsValues": null
+    }
+  ]
+}

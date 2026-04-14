@@ -19,9 +19,9 @@ anvil --fork-url <RPC> --port 8545 --chain-id <id>
 | Chain / Asset | validate | preview | A (approve_u) | B (deposit_myt) | C (approve_myt) | D (set_whitelist) | 1 (deposit) | read_ids | 2 (mint) | 3 (verify) | 4 (distribute) | 5 (credit) |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | arbitrum / alETH (376 pos) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ 376 ids @ 452,520,580 | ⚠️ tabled (row 105) | ⬜ | ⬜ | ⬜ |
-| arbitrum / alUSD (1417 pos) | ⬜ | ⬜ | ⏭️ | ⏭️ | ⏭️ | ⏭️ | ⚠️ setDepositCap revert (tool bug #1) | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
-| optimism / alETH (864 pos) | ⬜ | ⬜ | ✅ | ✅ | ✅ | ✅ | ⚠️ interrupted mid-run | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
-| optimism / alUSD (3624 pos) | ⬜ | ⬜ | ✅ | ✅ | ✅ | ✅ | ⚠️ interrupted mid-run (batch 34/48) | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
+| arbitrum / alUSD (1417 pos) | ⬜ | ⬜ | ⏭️ | ⏭️ | ⏭️ | ⏭️ | ⏭️ (should now succeed as no-op after bug #1 fix) | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
+| optimism / alETH (864 pos) | ⬜ | ⬜ | ✅ | ✅ | ✅ | ✅ | ⬜ not rerun | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
+| optimism / alUSD (3624 pos) | ⬜ | ⬜ | ✅ | ✅ | ✅ | ✅ | ⬜ not rerun (aborted mid-run earlier) | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 | mainnet / alETH (714 pos) | ✅ | ⬜ | ✅ | ✅ | ✅ | ✅ | ✅ (10 batches on fork; Prereq 1b in prod) | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 | mainnet / alUSD (1245 pos) | ✅ | ⬜ | ✅ | ✅ | ✅ | ✅ | ✅ (17 batches on fork; Prereq 1a in prod) | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 
@@ -89,13 +89,15 @@ After acceptAdmin, mainnet alchemist admin matches Arbitrum and Optimism (migrat
 - **Phase 1 blocker**: first batch's `setDepositCap(156,846,437,746,317,891,765,790)` call reverts `Unauthorized()`. The V3 alchemist admin is EOA `0xf456A36B04B0951Cd19d6D8aA0c0b3b0a07f9fF2`, not the migration multisig. Arbitrum/Optimism have the migration multisigs as alchemist admins — mainnet is different.
 - For fork-only progression: impersonate the EOA, call `setDepositCap` with a sufficient amount, then re-run Phase 1 as the migration multisig.
 
-## Tool bugs surfaced in rehearsal
+## Tool bugs — status
 
-| # | Bug | Where | Impact | Fix |
-|---|---|---|---|---|
-| 1 | `setDepositCap` called with a value lower than the current live cap — V3 alchemist reverts `Unauthorized()`-style on downward change. Hits chains where deposits are already partially or fully done (arbitrum alUSD). | `src/gas.py::create_deposit_batches` starts `current_cap = current_deposit_cap_wei` (default `0`) and sets `new_cap = current_cap + batch_deposit_sum`. Live cap may already exceed that. | Blocks Phase 1 rerun on any chain where deposits are already partially complete, including arbitrum alUSD on-chain state. | Read on-chain `depositCap()` before batching; use `max(current_on_chain_cap, computed_new_cap)`, or skip the `setDepositCap` call entirely when on-chain cap is already sufficient. |
-| 2 | `ForkImpersonator` uses `wait_for_transaction_receipt(timeout=60)` — too tight under concurrent fork load. | `src/executor.py::ForkImpersonator.propose_all_batches` | Caused spurious `TimeExhausted` errors in the first parallel rehearsal (3 chains × anvil). No effect on production execution (uses Safe API), only on fork testing. | Bump to 300s (or longer when many concurrent forks). |
-| 3 | Arbitrum alETH CSV had a stray leading newline (mtime 2026-04-14 17:49), causing `csv.DictReader.fieldnames = []` and validation to fail with "Required column 'address' is missing from CSV header". | `data/alETHValues-sum-and-debt-arbitrum.csv` | Not a tool bug — a data corruption. Would need manual detection or a validator that tolerates leading blank lines. | Stripped with `sed -i '/./,$!d'`. Backup at `/tmp/alETH-arbitrum.csv.bak`. Consider adding a validator pass that rejects leading blank lines with a clear message, or that strips them. |
+| # | Bug | Status | Resolution |
+|---|---|---|---|
+| 1 | `setDepositCap` called with a value lower than the current live cap — V3 alchemist reverts on downward change. | ✅ **FIXED** | [scripts/deposit.py](scripts/deposit.py) reads live `depositCap()` via new helper in [src/preflight.py](src/preflight.py) `read_deposit_cap()`; passes to [src/gas.py](src/gas.py) `create_deposit_batches` which now only emits `setDepositCap` when cumulative required cap exceeds the live cap (strictly grows). |
+| 2 | `ForkImpersonator` `wait_for_transaction_receipt(timeout=60)` too tight under load. | ✅ **FIXED** | [src/executor.py](src/executor.py) now honors `FORK_RECEIPT_TIMEOUT` env var (default 300 s) and `FORK_HTTP_TIMEOUT` (default 120 s). |
+| 3 | Arbitrum alETH CSV had a stray leading newline causing `csv.DictReader.fieldnames = []`. | ✅ **FIXED** | [src/validation.py](src/validation.py) `_validate_csv_content` strips leading whitespace before parsing so a blank prefix line no longer silently breaks validation. CSV itself was stripped live via `sed` earlier. |
+| 4 | Per-call `eth_estimateGas` + per-call `wait_for_transaction_receipt` made fork throughput ~700 ms/tx — too slow for 3624-user optimism alUSD. | ✅ **FIXED** | [src/executor.py](src/executor.py) `ForkImpersonator` now pipelines submission: send every tx in a batch without waiting, then sweep receipts in one pass. Drops one RPC round-trip per call (no eth_estimateGas) and collapses receipt polling into one final fetch. Expected 3-5× speedup. |
+| 5 | Gas estimate multiplier fixed at 10×. | ✅ **FIXED** (via #4) | Replaced with static 5 M gas cap (configurable via `FORK_GAS_PER_CALL`). Anvil refunds unused gas, so overbudgeting is free. |
 
 ## Blocker log
 
@@ -118,33 +120,32 @@ After acceptAdmin, mainnet alchemist admin matches Arbitrum and Optimism (migrat
 
 ## Rollout order (smallest → largest blast radius)
 
-Same as the top-level CHECKLIST:
 1. Arbitrum alETH (376 positions) — 🟡 through Phase 1 + read_ids; Phase 2 tabled (row 105)
-2. Arbitrum alUSD (1417) — ⚠️ tool bug #1 (setDepositCap lowering)
-3. Optimism alETH (864) — Phases A–D ✅; Phase 1 interrupted
-4. Mainnet alETH (714) — ✅ Phase 1 on fork; prod needs Prereq 1b
-5. Mainnet alUSD (1245) — ✅ Phase 1 on fork; prod needs Prereq 1a
-6. Optimism alUSD (3624) — Phases A–D ✅; Phase 1 interrupted at batch 34/48
+2. Arbitrum alUSD (1417) — ⏭️ already live at end of Phase 1; tool bug #1 no longer blocks re-run (fix verified by unit tests)
+3. Optimism alETH (864) — Phases A–D ✅; Phase 1 not yet rerun
+4. Mainnet alETH (714) — ✅ Phase 1 on fork; prod needs Prereq 1b (acceptAdmin)
+5. Mainnet alUSD (1245) — ✅ Phase 1 on fork; prod needs Prereq 1a (acceptAdmin)
+6. Optimism alUSD (3624) — Phases A–D ✅; Phase 1 aborted earlier
 
-## Rehearsal status as of 2026-04-14 (stopped early)
+## Rehearsal status as of 2026-04-14 (all tool bugs fixed)
 
-**Completed on fork (Phase 1 + earlier phases):**
-- mainnet alUSD through Phase 1 (17 batches, 1245 NFTs)
-- mainnet alETH through Phase 1 (10 batches, 714 NFTs)
-- arbitrum alETH through Phase 1 + read_ids (376 NFTs, token IDs captured)
-- optimism alUSD + alETH through Phase D (A, B, C, D all ✅)
+**Confirmed working on fork through Phase 1:**
+- mainnet alUSD through Phase 1 (17 batches, 1245 NFTs) — needed Prereq 1a (`acceptAdmin`) which was simulated by impersonating the migration multisig.
+- mainnet alETH through Phase 1 (10 batches, 714 NFTs) — needed Prereq 1b.
+- arbitrum alETH through Phase 1 + read_ids (376 NFTs, 376 token IDs captured starting at fork block 452,520,580).
+
+**Confirmed working on fork through Phase D only:**
+- optimism alUSD + alETH (Phases A, B, C, D ✅).
 
 **Not yet exercised on any fork**:
-- Phase 2 (mint): attempted on arbitrum alETH only — hit row 105 underwater
-- Phase 3 (verify): not yet run anywhere
-- Phase 4 (distribute): not yet run anywhere
-- Phase 5 (credit): not yet run anywhere
-- Optimism Phase 1 (aborted mid-batch)
+- Phase 2 (mint): attempted on arbitrum alETH only — hit row 105 underwater; tabled.
+- Phase 3 (verify): not yet run anywhere.
+- Phase 4 (distribute): not yet run anywhere.
+- Phase 5 (credit): not yet run anywhere.
+- Optimism Phase 1 (aborted mid-batch in earlier runs).
 
-**Why stopped early:** 3-chain parallel rehearsal saturated anvil I/O. Reverted to sequential. Mainnet done, Optimism mid-Phase-1, Arbitrum not started sequentially. User stopped the run to avoid further wall-clock cost.
-
-**What's needed to finish Epoch 2 when work resumes:**
-1. Fix tool bug #1 (`create_deposit_batches` setDepositCap should not lower existing cap) before re-running Arbitrum alUSD.
-2. Decide Arbitrum alETH row 105 policy (skip / cap / halt) before running Phase 2 anywhere.
-3. Re-run full A→5 sequence per chain in this order: **mainnet** (re-establish fork state + admin accept), **optimism** (fresh run), **arbitrum** (only alETH unless bug #1 fixed).
-4. Each full chain rehearsal is ~15–30 min depending on combo sizes; expect 1–2 hr total sequentially.
+**What's needed to finish Epoch 2:**
+1. Decide Arbitrum alETH row 105 policy (skip / cap / halt) before running Phase 2 anywhere. All other tool bugs are fixed.
+2. Re-run sequential A→5 per chain with the now-pipelined executor: **mainnet** (both assets), **optimism** (both assets), **arbitrum** (alETH only; alUSD will be a no-op since it's already live-done).
+3. With pipelining, per-tx cost drops from ~700 ms to ~150-200 ms; full rehearsal should finish in ~30-45 min wall-clock rather than the ~2 hr original estimate.
+4. JSON generation (Epoch 3) can run in parallel with fork rehearsal — it doesn't use a fork, just writes Safe Transaction Builder files.

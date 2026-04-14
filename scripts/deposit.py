@@ -229,7 +229,7 @@ def cli(
                 fg="yellow", bold=True,
             ))
             click.echo(f"  Safe: {safe_url}")
-            if not click.confirm(
+            if not yes and not click.confirm(
                 click.style(f"Propose batch {i + 1}/{n_batches}?", fg="yellow")
             ):
                 click.echo(click.style(

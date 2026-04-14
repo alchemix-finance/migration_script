@@ -1,0 +1,21 @@
+{
+  "version": "1.0",
+  "chainId": "1",
+  "createdAt": 1776207946261,
+  "meta": {
+    "name": "mainnet_alUSD_deposit_myt_batch1",
+    "description": "deposit_myt \u2014 batch 1 (1 calls)",
+    "txBuilderVersion": "1.17.0",
+    "createdFromSafeAddress": "0xF56D660138815fC5d7a06cd0E1630225E788293D",
+    "createdFromOwnerAddress": ""
+  },
+  "transactions": [
+    {
+      "to": "0x9B44efCa3e2a707B63Dc00CE79d646E5E5D24bA5",
+      "value": "0",
+      "data": "0x6e553f650000000000000000000000000000000000000000000000000000041c8fdc0493000000000000000000000000f56d660138815fc5d7a06cd0e1630225e788293d",
+      "contractMethod": null,
+      "contractInputsValues": null
+    }
+  ]
+}

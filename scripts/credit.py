@@ -194,7 +194,7 @@ def cli(
     click.echo(f"  Verify: cross-reference the CSV data in the batch calldata.")
     click.echo(f"  Remaining batches: {len(remaining_batches)}")
 
-    if not click.confirm(
+    if not yes and not click.confirm(
         click.style("Verified first batch. Continue with remaining?", fg="yellow")
     ):
         click.echo(

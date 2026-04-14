@@ -1,0 +1,21 @@
+{
+  "version": "1.0",
+  "chainId": "42161",
+  "createdAt": 1776208008622,
+  "meta": {
+    "name": "arbitrum_alETH_approve_myt_batch1",
+    "description": "approve_myt \u2014 batch 1 (1 calls)",
+    "txBuilderVersion": "1.17.0",
+    "createdFromSafeAddress": "0xeE1Aa1C3D0622fCeD823c7720cf9E8079558484b",
+    "createdFromOwnerAddress": ""
+  },
+  "transactions": [
+    {
+      "to": "0xfe8F223F3d81462F55bf8609897B8cEcfA4B195C",
+      "value": "0",
+      "data": "0x095ea7b3000000000000000000000000ded3a04612ff12b57317abe38e68026fc9d281140000000000000000000000000000000000000000000000066a2ee49d572e4ac1",
+      "contractMethod": null,
+      "contractInputsValues": null
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "version": "1.0",
+  "chainId": "42161",
+  "createdAt": 1776194608042,
+  "meta": {
+    "name": "arbitrum_alUSD_deposit_myt_batch1",
+    "description": "deposit_myt \u2014 batch 1 (1 calls)",
+    "txBuilderVersion": "1.17.0",
+    "createdFromSafeAddress": "0xeE1Aa1C3D0622fCeD823c7720cf9E8079558484b",
+    "createdFromOwnerAddress": ""
+  },
+  "transactions": [
+    {
+      "to": "0xEba62B842081CeF5a8184318Dc5C4E4aACa9f651",
+      "value": "0",
+      "data": "0x6e553f6500000000000000000000000000000000000000000000000000000010b790945e000000000000000000000000ee1aa1c3d0622fced823c7720cf9e8079558484b",
+      "contractMethod": null,
+      "contractInputsValues": null
+    }
+  ]
+}

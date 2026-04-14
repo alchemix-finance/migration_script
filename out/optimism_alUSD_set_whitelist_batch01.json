@@ -1,0 +1,28 @@
+{
+  "version": "1.0",
+  "chainId": "10",
+  "createdAt": 1776207974645,
+  "meta": {
+    "name": "optimism_alUSD_set_whitelist_batch1",
+    "description": "set_whitelist \u2014 batch 1 (2 calls)",
+    "txBuilderVersion": "1.17.0",
+    "createdFromSafeAddress": "0xC224bf25Dcc99236F00843c7D8C4194abE8AA94a",
+    "createdFromOwnerAddress": ""
+  },
+  "transactions": [
+    {
+      "to": "0xCB8FA9a76b8e203D8C3797bF438d8FB81Ea3326A",
+      "value": "0",
+      "data": "0x53d6fd5900000000000000000000000010294d57a419c8eb78c648372c5baa27fd1484af0000000000000000000000000000000000000000000000000000000000000000",
+      "contractMethod": null,
+      "contractInputsValues": null
+    },
+    {
+      "to": "0xCB8FA9a76b8e203D8C3797bF438d8FB81Ea3326A",
+      "value": "0",
+      "data": "0x53d6fd59000000000000000000000000930750a3510e703535e943e826aba3c364ffc1de0000000000000000000000000000000000000000000000000000000000000001",
+      "contractMethod": null,
+      "contractInputsValues": null
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "version": "1.0",
+  "chainId": "42161",
+  "createdAt": 1776208010582,
+  "meta": {
+    "name": "arbitrum_alETH_set_whitelist_batch1",
+    "description": "set_whitelist \u2014 batch 1 (2 calls)",
+    "txBuilderVersion": "1.17.0",
+    "createdFromSafeAddress": "0x7e108711771DfdB10743F016D46d75A9379cA043",
+    "createdFromOwnerAddress": ""
+  },
+  "transactions": [
+    {
+      "to": "0x17573150d67d820542EFb24210371545a4868B03",
+      "value": "0",
+      "data": "0x53d6fd59000000000000000000000000654e16a0b161b150f5d1c8a5ba6e7a7b7760703a0000000000000000000000000000000000000000000000000000000000000000",
+      "contractMethod": null,
+      "contractInputsValues": null
+    },
+    {
+      "to": "0x17573150d67d820542EFb24210371545a4868B03",
+      "value": "0",
+      "data": "0x53d6fd59000000000000000000000000ded3a04612ff12b57317abe38e68026fc9d281140000000000000000000000000000000000000000000000000000000000000001",
+      "contractMethod": null,
+      "contractInputsValues": null
+    }
+  ]
+}
