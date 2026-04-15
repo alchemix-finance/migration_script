@@ -38,7 +38,7 @@ from src.validation import format_validation_errors, validate_csv_file
 @click.option("--yes", "-y", is_flag=True, default=False)
 @click.option("--dry-run", is_flag=True, default=False)
 @click.option("--skip-validation", is_flag=True, default=False)
-@click.option("--mode", type=click.Choice(["json", "impersonate", "propose"]), default="json")
+@click.option("--mode", type=click.Choice(["json", "impersonate", "propose"]), default="propose")
 @click.option("--resume", is_flag=True, default=False,
               help="Skip debt users whose position already has the expected debt (e.g. after a partial run).")
 @ape_cli_context()
@@ -247,6 +247,12 @@ def cli(
     first_ok = sum(1 for r in first_results if r.get("status") in ("success", "stubbed"))
     if first_ok == 0:
         click.echo(click.style("First batch proposal failed. Aborting.", fg="red"))
+        for r in first_results:
+            if r.get("message"):
+                click.echo(click.style(f"  {r['message']}", fg="red"))
+            if r.get("status") == "error":
+                click.echo(click.style(f"  api_url: {r.get('api_url', 'n/a')}", fg="red"))
+                click.echo(click.style(f"  nonce: {r.get('nonce', 'n/a')}", fg="red"))
         raise SystemExit(1)
 
     click.echo(click.style(

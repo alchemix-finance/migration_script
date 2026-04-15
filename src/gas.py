@@ -4,7 +4,7 @@ Batching strategy:
   Each batch is limited by three constraints (whichever is hit first):
     1. Gas:   90% of chain's block gas limit
     2. Size:  90% of chain's max transaction calldata
-    3. Calls: MAX_CALLS_PER_BATCH (default 50)
+    3. Calls: MAX_CALLS_PER_BATCH (default 200), MAX_MINTS_PER_BATCH (70)
 
   Per-chain limits:
     mainnet:  60M gas,  128KB calldata
@@ -30,6 +30,7 @@ from src.config import (
     GAS_LARGE_POSITION_SURCHARGE,
     LARGE_POSITION_THRESHOLD,
     MAX_CALLS_PER_BATCH,
+    MAX_MINTS_PER_BATCH,
     MULTISEND_CALL_BYTES,
     MULTISEND_WRAPPER_BYTES,
     get_effective_gas_limit,
@@ -185,6 +186,7 @@ def create_mint_batches(
 
     gas_limit = get_effective_gas_limit(chain)
     size_limit = get_effective_size_limit(chain)
+    max_mints = MAX_MINTS_PER_BATCH
 
     mintable = [p for p in positions if p.mint_amount_wei > 0]
     if not mintable:
@@ -201,7 +203,7 @@ def create_mint_batches(
         mint_tx = build_mint_tx(position, alchemist_address, multisig, token_id)
 
         if current_batch.calls and not _can_add_call(
-            current_batch, mint_tx, gas_limit, size_limit, MAX_CALLS_PER_BATCH
+            current_batch, mint_tx, gas_limit, size_limit, max_mints
         ):
             batches.append(current_batch)
             current_batch = TransactionBatch(batch_number=len(batches) + 1, batch_type="mint")

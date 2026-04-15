@@ -52,6 +52,7 @@ CHAIN_TX_SIZE_LIMITS: dict[str, int] = {
 GAS_TARGET_PERCENT = 0.90           # Target 90% of block gas limit per batch
 SIZE_TARGET_PERCENT = 0.90          # Target 90% of max tx size per batch
 MAX_CALLS_PER_BATCH = 200           # Safety cap — real constraint is gas/size per chain
+MAX_MINTS_PER_BATCH = 70            # Mint-specific cap to avoid out-of-gas / tx-size issues
 
 # MultiSend encoding overhead (bytes)
 MULTISEND_WRAPPER_BYTES = 68        # 4 (selector) + 32 (offset) + 32 (length)

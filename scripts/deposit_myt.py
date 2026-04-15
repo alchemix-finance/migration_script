@@ -36,7 +36,7 @@ from src.validation import format_validation_errors, validate_csv_file
 @click.command()
 @click.option("--chain", type=click.Choice(get_supported_chains()), required=True)
 @click.option("--asset", type=click.Choice(["usd", "eth"]), required=True)
-@click.option("--mode", type=click.Choice(["json", "impersonate", "propose"]), default="json")
+@click.option("--mode", type=click.Choice(["json", "impersonate", "propose"]), default="propose")
 @click.option("--yes", "-y", is_flag=True, default=False)
 @click.option("--dry-run", is_flag=True, default=False)
 @click.option("--verbose", "-v", is_flag=True, default=False)

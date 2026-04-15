@@ -326,8 +326,8 @@ class ProposeToSafe:
 
     # Safe Transaction Service URLs by chain
     SAFE_TX_SERVICE_URLS: dict[int, str] = {
-        1: "https://safe-transaction-mainnet.safe.global",
-        10: "https://safe-transaction-optimism.safe.global",
+        1: "https://api.safe.global/tx-service/eth",
+        10: "https://api.safe.global/tx-service/oeth",
         42161: "https://api.safe.global/tx-service/arb1",
     }
 

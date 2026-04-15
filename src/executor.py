@@ -2,9 +2,8 @@
 
 Three execution modes, each implementing `propose_all_batches(safe_txs)`:
 
-- `propose`     → legacy Safe API proposal (requires private key). Existing behavior.
+- `propose`     → Safe API proposal (requires private key in .env). Default production path.
 - `json`        → writes Safe Transaction Builder JSON files to out/ for UI upload.
-                  Production path (no signing key needed).
 - `impersonate` → directly sends each call from the multisig on an ape fork
                   using account impersonation. Testing path (no signing key needed).
 
