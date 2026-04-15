@@ -20,8 +20,8 @@ _(Note: `validate` and `preview` columns omitted — `validate` runs implicitly 
 
 | Chain / Asset | A (approve_u) | B (deposit_myt) | C (approve_myt) | D (setWhitelist + setCeiling) | 1 (deposit) | read_ids | 2 (mint) | 3 (verify) | 4 (distribute) | 5 (credit) |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| arbitrum / alETH **(375 pos — row 105 removed)** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ 376 ids @ 452,520,580 (stale; regen post fresh Phase 1) | ⬜ unblocked by row removal | ⬜ | ⬜ | ⬜ |
-| arbitrum / alUSD (1417 pos) | ⏭️ | ⏭️ | ⏭️ | ⏭️ | ⏭️ live | ✅ from-cache | ✅ mint (334 debt users) | ✅ verify | 🟡 partial 845/1417 (Alchemy upstream stall at 900 s timeout) | ⬜ |
+| arbitrum / alETH **(375 pos — row 105 removed)** | ✅ | ✅ | ✅ | ✅ | ✅ via `deposit --resume` (196 + 179 = 375 NFTs) | ✅ 375 ids fresh | ✅ via `mint --resume` (201 + 73 = 274 debt users) | ✅ | ✅ all 375 at users | ✅ 0.067616 alETH; surplus 49.74 alETH for manual burn |
+| arbitrum / alUSD (1417 pos) | ⏭️ | ⏭️ | ⏭️ | ⏭️ | ⏭️ live | ✅ from-cache | ✅ mint exact +32,807.81 alUSD | ✅ verify | ✅ distribute 1417/1417 (846 first run + 571 via --resume) | ✅ credit 67.29 alUSD to 1083 users; multisig burn surplus 32,740.52 alUSD |
 | optimism / alETH (864 pos) | ✅ | ✅ | ✅ | ⬜ needs setCeiling addition | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 | optimism / alUSD (3624 pos) | ✅ | ✅ | ✅ | ⬜ needs setCeiling addition | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 | mainnet / alETH (714 pos) | ✅ | ✅ | ✅ | ✅ | ✅ (10 batches; Prereq 1b in prod) | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |

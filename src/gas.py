@@ -122,7 +122,11 @@ def create_deposit_batches(
     # setDepositCap calls we've already emitted in earlier batches. Starts at
     # the actual on-chain value.
     live_cap = current_deposit_cap_wei
-    cumulative_needed = 0  # total deposit sum we've allocated across batches so far
+    # `cumulative_needed` is the cap value the alchemist must reach to cover
+    # every deposit we'll make. Starts at the current live cap (= current
+    # alchemist.totalDeposited assumption) so resumed runs don't underbid the
+    # cap. Each new deposit pushes this higher.
+    cumulative_needed = current_deposit_cap_wei
     batch_deposit_sum = 0
 
     def _finalize_batch(batch: TransactionBatch, cap_sum: int) -> TransactionBatch:
