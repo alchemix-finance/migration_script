@@ -45,6 +45,8 @@ from src.validation import format_validation_errors, validate_csv_file
 @click.option("--skip-validation", is_flag=True, default=False)
 @click.option("--mode", type=click.Choice(["json", "impersonate", "propose"]), default="json",
               help="json=emit Safe Builder JSON; impersonate=fork execute; propose=legacy API")
+@click.option("--resume", is_flag=True, default=False,
+              help="Skip CSV positions whose NFT is already minted (count-based: skips first NFT.totalSupply() rows).")
 @ape_cli_context()
 def cli(
     cli_ctx,
@@ -55,6 +57,7 @@ def cli(
     dry_run: bool,
     skip_validation: bool,
     mode: str,
+    resume: bool,
 ) -> None:
     """Step 1: Deposit MYT to create NFT positions (minting is separate)."""
     asset_type = AssetType.USD if asset == "usd" else AssetType.ETH
@@ -131,11 +134,35 @@ def cli(
     except Exception as e:
         click.echo(click.style(f"  warning: could not read live depositCap ({e}); defaulting to 0", fg="yellow"))
 
+    positions_to_deposit = result.positions
+    if resume:
+        # NFTs are minted in CSV order. Read NFT.totalSupply() to learn how
+        # many positions have already been deposited and skip the prefix.
+        click.echo(click.style("\n[1.5/4] --resume: reading current NFT count...", fg="cyan", bold=True))
+        import os
+        from web3 import Web3
+        from eth_utils import keccak
+        from eth_abi import decode
+        from src.preflight import _rpc_url
+        rpc_url = os.environ.get("FORK_RPC_URL") or _rpc_url(chain)
+        w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 30}))
+        nft_addr = asset_config.get("nft", "")
+        sel = keccak(text="totalSupply()")[:4]
+        raw = w3.eth.call({"to": Web3.to_checksum_address(nft_addr), "data": "0x" + sel.hex()})
+        already_minted = int(decode(["uint256"], raw)[0])
+        click.echo(f"  NFT.totalSupply(): {already_minted}")
+        click.echo(f"  CSV positions:    {len(result.positions)}")
+        if already_minted >= len(result.positions):
+            click.echo(click.style("All positions already deposited. Nothing to do.", fg="yellow"))
+            raise SystemExit(0)
+        positions_to_deposit = result.positions[already_minted:]
+        click.echo(f"  resuming from CSV row {already_minted + 1}, processing {len(positions_to_deposit)} remaining")
+
     # Build deposit batches
     click.echo(click.style("\n[2/4] Building deposit batches...", fg="cyan", bold=True))
 
     batches = create_deposit_batches(
-        positions=result.positions,
+        positions=positions_to_deposit,
         alchemist_address=alchemist,
         multisig=multisig,
         chain=chain,

@@ -127,15 +127,20 @@ def check_whitelist_transition_done(
 
 
 def read_deposit_cap(chain: str, alchemist_address: str) -> int:
-    """Read the live `depositCap()` value on the alchemist.
+    """Read the current `depositCap()` value on the alchemist.
 
     Used to avoid emitting `setDepositCap(...)` calls that would lower the
-    already-higher live cap — V3 alchemist reverts on downward changes.
+    already-higher cap — V3 alchemist reverts on downward changes.
+
+    Honors `FORK_RPC_URL` env var: when set (--mode impersonate runs), reads
+    the fork's cap, which may differ from live (e.g. after partial Phase 1).
     """
+    import os
     from web3 import Web3
     from eth_utils import keccak
     from eth_abi import decode
-    w3 = Web3(Web3.HTTPProvider(_rpc_url(chain), request_kwargs={"timeout": 15}))
+    rpc_url = os.environ.get("FORK_RPC_URL") or _rpc_url(chain)
+    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 15}))
     sel = keccak(text="depositCap()")[:4]
     raw = w3.eth.call({"to": Web3.to_checksum_address(alchemist_address), "data": "0x" + sel.hex()})
     return int(decode(["uint256"], raw)[0])

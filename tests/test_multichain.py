@@ -151,7 +151,7 @@ class TestMultiChainCSVValidation:
             ("optimism", AssetType.USD): 3624,
             ("optimism", AssetType.ETH): 864,
             ("arbitrum", AssetType.USD): 1417,
-            ("arbitrum", AssetType.ETH): 376,
+            ("arbitrum", AssetType.ETH): 375,  # row 105 removed (underwater user)
         }
         for (chain, asset), expected_count in snapshots.items():
             csv_path = get_csv_path(chain, asset)
