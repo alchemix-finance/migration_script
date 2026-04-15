@@ -97,9 +97,7 @@ Eight test files were out of sync on clean `main` — pre-existing breakage from
 ## Epoch 2: Dry Run (Fork Impersonation) — per chain × asset (6 total)
 Order: Arbitrum alETH → Arbitrum alUSD → Optimism alETH → Mainnet alETH → Mainnet alUSD → Optimism alUSD
 
-For each chain × asset (idempotent — phases already done on-chain will SKIP automatically):
-- [ ] `ape run validate --chain <c> --asset <a>`
-- [ ] `ape run preview --chain <c> --asset <a>`
+For each chain × asset (idempotent — phases already done on-chain will SKIP automatically). `validate` and `preview` are skipped — `validate` runs implicitly inside every other phase, and `preview` is informational only.
 - [ ] Phase A: `ape run approve_underlying --mode impersonate`
 - [ ] Phase B: `ape run deposit_myt --mode impersonate`
 - [ ] Phase C: `ape run approve_myt --mode impersonate`

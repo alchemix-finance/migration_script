@@ -180,11 +180,14 @@ class ForkImpersonator:
 
         # Fork-throughput tuning:
         # - Skip per-call eth_estimateGas; use a high static gas cap (anvil
-        #   discards unused gas, so overbudgeting is free). This removes one
-        #   RPC round-trip per call.
-        # - Poll receipts at 10 ms intervals since anvil auto-mines. Default
-        #   web3.py poll_latency is 0.5 s, which is the dominant cost when the
-        #   underlying tx is effectively instant.
+        #   discards unused gas, so overbudgeting is free). Saves one RPC
+        #   round-trip per call.
+        # - Wait for each tx's receipt before submitting the next. Earlier
+        #   experiment with pipelined submit (send all → sweep receipts)
+        #   produced occasional 300s stalls on large batches because some
+        #   submits outpaced anvil's tx acceptance, leaving hashes without
+        #   matching receipts. Per-tx wait with a tight 10ms poll_latency
+        #   is nearly as fast and deterministic.
         fork_gas = int(os.environ.get("FORK_GAS_PER_CALL", str(5_000_000)))
         poll_latency = float(os.environ.get("FORK_POLL_LATENCY", "0.01"))
 

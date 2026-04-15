@@ -45,6 +45,40 @@ def _encode_set_whitelist(target: str, state: bool) -> bytes:
     return encode_function_call(abi, "setWhitelist", [target, state])
 
 
+def _encode_set_ceiling(target: str, ceiling: int) -> bytes:
+    """Encode setCeiling(address,uint256) — sets the alchemist's mint ceiling on the alToken.
+
+    Without a non-zero ceiling, alchemist.mint() reverts with
+    "AlUSD/alETH: Alchemist's ceiling was breached." V2's ceiling is typically
+    10^30+ (effectively unbounded for migration amounts); V3 defaults to 0.
+    """
+    from src.transactions import encode_function_call
+    abi = [{
+        "type": "function", "name": "setCeiling", "stateMutability": "nonpayable",
+        "inputs": [{"name": "alchemist", "type": "address"}, {"name": "ceiling", "type": "uint256"}],
+        "outputs": [],
+    }]
+    return encode_function_call(abi, "setCeiling", [target, ceiling])
+
+
+# Ceiling applied to the V3 alchemist. 10^30 matches V2's typical value — orders of
+# magnitude above any plausible migration mint total, so the ceiling never binds.
+V3_CEILING = 10 ** 30
+
+
+def _read_ceiling(chain: str, al_token: str, alchemist: str) -> int:
+    """Read alToken.ceiling(alchemist) from the live chain."""
+    from web3 import Web3
+    from eth_utils import keccak
+    from eth_abi import encode, decode
+    from src.preflight import _rpc_url
+    w3 = Web3(Web3.HTTPProvider(_rpc_url(chain), request_kwargs={"timeout": 15}))
+    sel = keccak(text="ceiling(address)")[:4]
+    data = sel + encode(["address"], [Web3.to_checksum_address(alchemist)])
+    raw = w3.eth.call({"to": Web3.to_checksum_address(al_token), "data": "0x" + data.hex()})
+    return int(decode(["uint256"], raw)[0])
+
+
 @click.command()
 @click.option("--chain", type=click.Choice(get_supported_chains()), required=True)
 @click.option("--asset", type=click.Choice(["usd", "eth"]), required=True)
@@ -126,6 +160,33 @@ def cli(cli_ctx, chain: str, asset: str, mode: str, yes: bool, dry_run: bool, ve
         ))
     else:
         click.echo("  V3 already whitelisted — skipping grant call.")
+
+    # Always set V3's mint ceiling. Without a non-zero ceiling, V3 alchemist.mint()
+    # reverts with "Alchemist's ceiling was breached." V2 ceilings are typically
+    # 10^30+ and remain in place unless separately revoked — we match that
+    # magnitude for V3 so the ceiling never binds during migration.
+    try:
+        v3_current_ceiling = _read_ceiling(chain, al_token, v3_alchemist)
+        click.echo(f"  current V3 ceiling: {v3_current_ceiling:,}")
+        if v3_current_ceiling < V3_CEILING:
+            batch.add_call(TransactionCall(
+                to=al_token,
+                data=_encode_set_ceiling(v3_alchemist, V3_CEILING),
+                value=0,
+                gas_estimate=55_000,
+                description=f"setCeiling({v3_alchemist}, {V3_CEILING}) — grant V3 mint ceiling",
+            ))
+        else:
+            click.echo("  V3 ceiling already sufficient — skipping.")
+    except Exception as e:
+        click.echo(click.style(f"  ceiling check failed ({e}); appending setCeiling defensively.", fg="yellow"))
+        batch.add_call(TransactionCall(
+            to=al_token,
+            data=_encode_set_ceiling(v3_alchemist, V3_CEILING),
+            value=0,
+            gas_estimate=55_000,
+            description=f"setCeiling({v3_alchemist}, {V3_CEILING}) — grant V3 mint ceiling",
+        ))
     if not batch.calls:
         click.echo(click.style("Nothing to do.", fg="yellow", bold=True))
         return

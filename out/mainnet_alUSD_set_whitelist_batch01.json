@@ -1,10 +1,10 @@
 {
   "version": "1.0",
   "chainId": "1",
-  "createdAt": 1776207950264,
+  "createdAt": 1776210345155,
   "meta": {
     "name": "mainnet_alUSD_set_whitelist_batch1",
-    "description": "set_whitelist \u2014 batch 1 (2 calls)",
+    "description": "set_whitelist \u2014 batch 1 (3 calls)",
     "txBuilderVersion": "1.17.0",
     "createdFromSafeAddress": "0x9e2b6378ee8ad2A4A95Fe481d63CAba8FB0EBBF9",
     "createdFromOwnerAddress": ""
@@ -21,6 +21,13 @@
       "to": "0xBC6DA0FE9aD5f3b0d58160288917AA56653660E9",
       "value": "0",
       "data": "0x53d6fd59000000000000000000000000eb83112d925268bede86654c13d423a987587e3e0000000000000000000000000000000000000000000000000000000000000001",
+      "contractMethod": null,
+      "contractInputsValues": null
+    },
+    {
+      "to": "0xBC6DA0FE9aD5f3b0d58160288917AA56653660E9",
+      "value": "0",
+      "data": "0x6c00c7f0000000000000000000000000eb83112d925268bede86654c13d423a987587e3e000000000000000000000000000000000000000c9f2c9cd04674edea40000000",
       "contractMethod": null,
       "contractInputsValues": null
     }

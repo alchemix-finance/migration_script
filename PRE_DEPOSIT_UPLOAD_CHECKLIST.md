@@ -99,6 +99,15 @@ Safe: `0xeE1Aa1C3D0622fCeD823c7720cf9E8079558484b` · [Safe UI](https://app.safe
 
 ## Status verification
 
+### Quick check — automated script
+
+```bash
+python scripts/check_pre_deposit_status.py                          # all chains, all assets
+python scripts/check_pre_deposit_status.py --chain arbitrum --asset eth
+```
+
+Output columns: `CHAIN | PHASE/CHECK | QUEUED | EXEC | DETAIL`. `QUEUED` polls the Safe Transaction Service for matching proposals (executed-or-pending); `EXEC` runs the on-chain probe (`admin()` / `whitelisted()` / `allowance()` / `balanceOf()`) and confirms the effect is in place. Both will read `OK` once a phase is fully done.
+
 ### Queued (proposed but not yet executed) — Safe Transaction Service API
 
 ```bash
