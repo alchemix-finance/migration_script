@@ -233,9 +233,14 @@ def _validate_csv_content(
     result = ValidationResult()
 
     try:
-        reader = csv.DictReader(file_obj)
+        # Strip any leading blank lines so a stray newline before the header
+        # doesn't cause DictReader to return `fieldnames = []` and then spuriously
+        # report missing columns. Seen in arbitrum alETH CSV (2026-04-14).
+        content = file_obj.read()
+        content = content.lstrip("\r\n \t")
+        reader = csv.DictReader(StringIO(content))
 
-        if reader.fieldnames is None:
+        if reader.fieldnames is None or not list(reader.fieldnames):
             result.errors.append(
                 ValidationError(0, "header", "CSV file is empty or has no header row")
             )

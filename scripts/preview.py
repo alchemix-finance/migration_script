@@ -51,7 +51,16 @@ def cli(cli_ctx, chain: str, asset: str, verbose: bool) -> None:
 
     alchemist = asset_config.get("alchemist") or "0x" + "0" * 40
     al_token = asset_config.get("al_token") or "0x" + "0" * 40
-    nft = alchemist
+    nft = asset_config.get("nft") or alchemist
+    myt = asset_config.get("myt") or ""
+
+    # Pull underlying info from myt_config (address + decimals) for pre-deposit batches.
+    from src.myt_config import MYT_CONFIG
+    asset_slug = "alUSD" if asset_type == AssetType.USD else "alETH"
+    myt_info = MYT_CONFIG.get(chain, {}).get(asset_slug, {})
+    underlying = str(myt_info.get("underlying", ""))
+    underlying_decimals = int(myt_info.get("underlying_decimals", 18))
+    myt_decimals = int(asset_config.get("myt_decimals", 18))
 
     plan = build_migration_plan(
         positions=result.positions,
@@ -60,6 +69,10 @@ def cli(cli_ctx, chain: str, asset: str, verbose: bool) -> None:
         al_token_address=al_token,
         nft_address=nft,
         multisig=multisig,
+        myt_address=myt,
+        underlying_address=underlying,
+        underlying_decimals=underlying_decimals,
+        myt_decimals=myt_decimals,
     )
 
     print_migration_plan(plan, chain_config, asset_config, verbose=verbose)

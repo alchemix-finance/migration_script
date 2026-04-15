@@ -1,0 +1,21 @@
+{
+  "version": "1.0",
+  "chainId": "1",
+  "createdAt": 1776207956284,
+  "meta": {
+    "name": "mainnet_alETH_deposit_myt_batch1",
+    "description": "deposit_myt \u2014 batch 1 (1 calls)",
+    "txBuilderVersion": "1.17.0",
+    "createdFromSafeAddress": "0xF56D660138815fC5d7a06cd0E1630225E788293D",
+    "createdFromOwnerAddress": ""
+  },
+  "transactions": [
+    {
+      "to": "0x29bcfeD246ce37319d94eBa107db90C453D4c43D",
+      "value": "0",
+      "data": "0x6e553f65000000000000000000000000000000000000000000000265d903fa78bc6b54b9000000000000000000000000f56d660138815fc5d7a06cd0e1630225e788293d",
+      "contractMethod": null,
+      "contractInputsValues": null
+    }
+  ]
+}

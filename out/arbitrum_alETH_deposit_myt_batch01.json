@@ -1,0 +1,21 @@
+{
+  "version": "1.0",
+  "chainId": "42161",
+  "createdAt": 1776208006411,
+  "meta": {
+    "name": "arbitrum_alETH_deposit_myt_batch1",
+    "description": "deposit_myt \u2014 batch 1 (1 calls)",
+    "txBuilderVersion": "1.17.0",
+    "createdFromSafeAddress": "0xeE1Aa1C3D0622fCeD823c7720cf9E8079558484b",
+    "createdFromOwnerAddress": ""
+  },
+  "transactions": [
+    {
+      "to": "0xfe8F223F3d81462F55bf8609897B8cEcfA4B195C",
+      "value": "0",
+      "data": "0x6e553f650000000000000000000000000000000000000000000000066a2ee49d572e4ac1000000000000000000000000ee1aa1c3d0622fced823c7720cf9e8079558484b",
+      "contractMethod": null,
+      "contractInputsValues": null
+    }
+  ]
+}

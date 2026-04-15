@@ -1,6 +1,6 @@
 import src.env  # Load .env on startup
 #!/usr/bin/env python3
-"""Step 2: Mint alAssets against NFT positions using real token IDs.
+"""Phase 2: Mint alAssets against NFT positions using real token IDs.
 
 Usage:
     ape run mint --chain mainnet --asset usd
@@ -25,7 +25,8 @@ from src.config import (
     verify_asset_config,
 )
 from src.gas import create_mint_batches, format_batch_summary, verify_batch_gas_limits
-from src.safe import ProposeToSafe, format_safe_batch
+from src.executor import make_executor
+from src.safe import ProposeToSafe, format_safe_batch  # ProposeToSafe kept for legacy --mode propose
 from src.types import AssetType
 from src.validation import format_validation_errors, validate_csv_file
 
@@ -37,6 +38,9 @@ from src.validation import format_validation_errors, validate_csv_file
 @click.option("--yes", "-y", is_flag=True, default=False)
 @click.option("--dry-run", is_flag=True, default=False)
 @click.option("--skip-validation", is_flag=True, default=False)
+@click.option("--mode", type=click.Choice(["json", "impersonate", "propose"]), default="json")
+@click.option("--resume", is_flag=True, default=False,
+              help="Skip debt users whose position already has the expected debt (e.g. after a partial run).")
 @ape_cli_context()
 def cli(
     cli_ctx,
@@ -46,6 +50,8 @@ def cli(
     yes: bool,
     dry_run: bool,
     skip_validation: bool,
+    mode: str,
+    resume: bool,
 ) -> None:
     """Step 2: Mint alAssets against positions using real token IDs."""
     asset_type = AssetType.USD if asset == "usd" else AssetType.ETH
@@ -125,11 +131,59 @@ def cli(
 
     alchemist = asset_config.get("alchemist", "") or "0x" + "0" * 40
 
+    # --resume: query alchemist.positions(tokenId) for each debt user; drop
+    # ones whose on-chain debt is already >= expected (already-minted).
+    positions_to_mint = result.positions
+    if resume and token_id_map is not None:
+        click.echo(click.style("\n[1.5/4] --resume: filtering already-minted positions...", fg="cyan", bold=True))
+        import os
+        from web3 import Web3
+        from eth_utils import keccak
+        from eth_abi import encode, decode
+        from src.preflight import _rpc_url
+        rpc_url = os.environ.get("FORK_RPC_URL") or _rpc_url(chain)
+        w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 60}))
+        # Standard alchemist accessor: positions(tokenId) returns (collateral, debt, ...).
+        # Try multiple shapes since V3 ABIs vary per chain.
+        def get_debt(tid: int) -> int | None:
+            for sig, ret_types, debt_ix in (
+                ("getCDP(uint256)", ["uint256", "uint256"], 1),
+                ("positions(uint256)", ["uint256", "uint256"], 1),
+                ("getPosition(uint256)", ["uint256", "uint256"], 1),
+            ):
+                sel = keccak(text=sig)[:4]
+                data = sel + encode(["uint256"], [tid])
+                try:
+                    raw = w3.eth.call({"to": Web3.to_checksum_address(alchemist), "data": "0x" + data.hex()})
+                    return int(decode(ret_types, raw)[debt_ix])
+                except Exception:
+                    continue
+            return None
+        kept: list = []
+        already: int = 0
+        for p in result.positions:
+            if p.mint_amount_wei == 0:
+                kept.append(p)  # zero-debt user; pass through (will be filtered out by create_mint_batches)
+                continue
+            tid = token_id_map.get(p.user_address.lower())
+            if tid is None:
+                kept.append(p); continue
+            d = get_debt(tid)
+            if d is None:
+                kept.append(p); continue
+            if d >= p.mint_amount_wei:
+                already += 1
+            else:
+                kept.append(p)
+        click.echo(f"  already minted: {already} debt users")
+        click.echo(f"  remaining: {sum(1 for p in kept if p.mint_amount_wei > 0)} debt users")
+        positions_to_mint = kept
+
     # Build mint batches
     click.echo(click.style("\n[2/4] Building mint batches...", fg="cyan", bold=True))
 
     batches = create_mint_batches(
-        result.positions, alchemist, multisig, token_id_map or {}, chain=chain,
+        positions_to_mint, alchemist, multisig, token_id_map or {}, chain=chain,
     )
 
     ok, errors = verify_batch_gas_limits(batches, chain=chain)
@@ -176,7 +230,10 @@ def cli(
 
     chain_id = chain_config["chain_id"]
     safe_txs = format_safe_batch(batches, chain_id=chain_id)
-    proposer = ProposeToSafe(safe_address=multisig, chain_id=chain_id)
+    proposer = make_executor(
+        mode, batches=batches, safe_address=multisig, chain_id=chain_id,
+        chain=chain, asset_type=asset_type, step_name="mint",
+    )
 
     # Checkpoint mode: propose first batch, pause for verification, then continue
     all_results = []
@@ -200,7 +257,7 @@ def cli(
     click.echo(f"  Verify: cross-reference the CSV data in the batch calldata.")
     click.echo(f"  Remaining batches: {len(remaining_batches)}")
 
-    if not click.confirm(click.style("Verified first batch. Continue with remaining?", fg="yellow")):
+    if not yes and not click.confirm(click.style("Verified first batch. Continue with remaining?", fg="yellow")):
         click.echo(click.style("Aborted. First batch still proposed — cancel in Safe UI if needed.", fg="red"))
         raise SystemExit(1)
 

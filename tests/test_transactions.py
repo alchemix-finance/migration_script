@@ -6,7 +6,6 @@ from eth_utils import keccak
 
 from src.abi import load_alchemist_abi, load_altoken_abi, load_erc721_abi
 from src.config import (
-    GAS_BURN,
     GAS_DEPOSIT,
     GAS_LARGE_POSITION_SURCHARGE,
     GAS_MINT,
@@ -18,7 +17,6 @@ from src.config import (
 from src.transactions import (
     TransactionBuildError,
     build_altoken_transfer_tx,
-    build_burn_tx,
     build_deposit_tx,
     build_mint_tx,
     build_nft_transfer_tx,
@@ -44,6 +42,9 @@ ZERO_ADDR = "0x0000000000000000000000000000000000000000"
 DEPOSIT_AMOUNT = 100 * 10**18   # 100 tokens — well below 10**21
 MINT_AMOUNT = 50 * 10**18       # 50 tokens — well below 10**21
 CREDIT_AMOUNT = 30 * 10**18
+# Amount used for tests that exercise the raw burn(uint256,uint256) selector via
+# encode_function_call. The V3 migration does not ship a build_burn_tx helper —
+# the multisig calls burn manually at the end of the migration.
 BURN_AMOUNT = 40 * 10**18
 TOKEN_ID = 42
 
@@ -417,57 +418,11 @@ class TestBuildMintTx:
         assert isinstance(tx, TransactionCall)
 
 
-# ---------------------------------------------------------------------------
-# TestBuildBurnTx
-# ---------------------------------------------------------------------------
-
-
-class TestBuildBurnTx:
-    """Tests for build_burn_tx."""
-
-    def test_to_is_alchemist(self):
-        """Transaction targets the alchemist address supplied."""
-        tx = build_burn_tx(TOKEN_ID, BURN_AMOUNT, ALCHEMIST, USER_ADDR)
-        assert tx.to == ALCHEMIST
-
-    def test_correct_selector(self):
-        """Calldata selector matches burn(uint256,uint256)."""
-        tx = build_burn_tx(TOKEN_ID, BURN_AMOUNT, ALCHEMIST, USER_ADDR)
-        expected = keccak(text="burn(uint256,uint256)")[:4]
-        assert tx.data[:4] == expected
-
-    def test_arg_order_amount_recipientid(self):
-        """Encoded args follow the order (amount, recipientId)."""
-        tx = build_burn_tx(TOKEN_ID, BURN_AMOUNT, ALCHEMIST, USER_ADDR)
-        decoded = decode(["uint256", "uint256"], tx.data[4:])
-        assert decoded[0] == BURN_AMOUNT
-        assert decoded[1] == TOKEN_ID
-
-    def test_calldata_length(self):
-        """burn() calldata is 4 + 2*32 = 68 bytes."""
-        tx = build_burn_tx(TOKEN_ID, BURN_AMOUNT, ALCHEMIST, USER_ADDR)
-        assert len(tx.data) == 4 + 2 * 32
-
-    def test_gas_estimate(self):
-        """Gas estimate equals GAS_BURN."""
-        tx = build_burn_tx(TOKEN_ID, BURN_AMOUNT, ALCHEMIST, USER_ADDR)
-        assert tx.gas_estimate == GAS_BURN
-
-    def test_value_is_zero(self):
-        tx = build_burn_tx(TOKEN_ID, BURN_AMOUNT, ALCHEMIST, USER_ADDR)
-        assert tx.value == 0
-
-    def test_description_mentions_user(self):
-        """Description mentions the user address for traceability."""
-        tx = build_burn_tx(TOKEN_ID, BURN_AMOUNT, ALCHEMIST, USER_ADDR)
-        assert USER_ADDR.lower() in tx.description.lower()
-
-    def test_different_token_ids_encode_correctly(self):
-        """Different token IDs are encoded correctly into the second argument."""
-        for tid in (1, 7, 100):
-            tx = build_burn_tx(tid, BURN_AMOUNT, ALCHEMIST, USER_ADDR)
-            decoded = decode(["uint256", "uint256"], tx.data[4:])
-            assert decoded[1] == tid
+# TestBuildBurnTx removed — V3 migration has no build_burn_tx helper.
+# The multisig performs the final burn manually once credits are distributed,
+# so there is no migration-script transaction to build for it. The burn
+# selector itself is still exercised in TestEncodeFunctionCall above via the
+# alchemist ABI, which retains the `burn` entry.
 
 
 # ---------------------------------------------------------------------------
@@ -669,7 +624,6 @@ class TestValidateTransactionCall:
         txs = [
             build_deposit_tx(debt_position, ALCHEMIST, MULTISIG),
             build_mint_tx(debt_position, ALCHEMIST, MULTISIG, TOKEN_ID),
-            build_burn_tx(TOKEN_ID, BURN_AMOUNT, ALCHEMIST, USER_ADDR),
             build_altoken_transfer_tx(AL_TOKEN, USER_ADDR, CREDIT_AMOUNT, USER_ADDR),
             build_nft_transfer_tx(NFT_ADDR, MULTISIG, USER_ADDR, TOKEN_ID),
             build_set_deposit_cap_tx(ALCHEMIST, 10**24),
@@ -697,15 +651,16 @@ class TestMigrationDesignInvariants:
         decoded = decode(["uint256", "address", "uint256"], tx.data[4:])
         assert decoded[2] == 0, "tokenId must be 0 so the contract auto-mints the NFT"
 
-    def test_mint_recipient_is_multisig_for_burn_phase(
+    def test_mint_recipient_is_multisig(
         self, debt_position: PositionMigration
     ):
-        """Minted alAssets must land in the multisig so Phase 3 burn() can clear debt."""
+        """Minted alAssets must land in the multisig, which later transfers credit
+        to credit users and burns the remainder manually."""
         tx = build_mint_tx(debt_position, ALCHEMIST, MULTISIG, TOKEN_ID)
         decoded = decode(["uint256", "uint256", "address"], tx.data[4:])
         recipient = decoded[2].lower()
         assert recipient == MULTISIG.lower(), (
-            "Mint recipient must be the multisig — the multisig calls burn() in Phase 3"
+            "Mint recipient must be the multisig — it distributes credits and burns the rest"
         )
 
     def test_nft_transfer_direction_multisig_to_user(self):
@@ -715,10 +670,4 @@ class TestMigrationDesignInvariants:
         assert decoded[0].lower() == MULTISIG.lower(), "'from' must be multisig"
         assert decoded[1].lower() == USER_ADDR.lower(), "'to' must be user"
 
-    def test_burn_positions_amount_before_token_id(self):
-        """burn(amount, recipientId): amount is first, tokenId is second."""
-        tx = build_burn_tx(TOKEN_ID, BURN_AMOUNT, ALCHEMIST, USER_ADDR)
-        decoded = decode(["uint256", "uint256"], tx.data[4:])
-        # decoded[0] = amount, decoded[1] = tokenId (the position's recipientId)
-        assert decoded[0] == BURN_AMOUNT
-        assert decoded[1] == TOKEN_ID
+    # burn invariant removed — see TestBuildBurnTx removal comment above.

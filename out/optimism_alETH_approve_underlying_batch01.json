@@ -1,0 +1,21 @@
+{
+  "version": "1.0",
+  "chainId": "10",
+  "createdAt": 1776207980335,
+  "meta": {
+    "name": "optimism_alETH_approve_underlying_batch1",
+    "description": "approve_underlying \u2014 batch 1 (1 calls)",
+    "txBuilderVersion": "1.17.0",
+    "createdFromSafeAddress": "0x3Dda174aa9E897e18b8E10e6Ce39c2a52398181d",
+    "createdFromOwnerAddress": ""
+  },
+  "transactions": [
+    {
+      "to": "0x4200000000000000000000000000000000000006",
+      "value": "0",
+      "data": "0x095ea7b300000000000000000000000091b8657aea26caa8a0e9d6dd4e24727ccf32f82200000000000000000000000000000000000000000000002e4e9658ab846541fa",
+      "contractMethod": null,
+      "contractInputsValues": null
+    }
+  ]
+}

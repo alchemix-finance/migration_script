@@ -168,6 +168,12 @@ class MigrationPlan:
     asset_type: AssetType
     positions: list[PositionMigration] = field(default_factory=list)
 
+    # Pre-deposit preparation batches (one call each; may be skipped if preflight
+    # detects the step is already complete on-chain).
+    approve_underlying_batches: list[TransactionBatch] = field(default_factory=list)
+    myt_deposit_batches: list[TransactionBatch] = field(default_factory=list)
+    approve_myt_batches: list[TransactionBatch] = field(default_factory=list)
+
     deposit_batches: list[TransactionBatch] = field(default_factory=list)
     mint_batches: list[TransactionBatch] = field(default_factory=list)
     transfer_batches: list[TransactionBatch] = field(default_factory=list)

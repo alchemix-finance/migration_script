@@ -23,6 +23,8 @@ from eth_utils import keccak
 from src.abi import load_alchemist_abi, load_altoken_abi, load_erc721_abi
 from src.config import (
     GAS_DEPOSIT,
+    GAS_ERC20_APPROVE,
+    GAS_ERC4626_DEPOSIT,
     GAS_LARGE_POSITION_SURCHARGE,
     GAS_MINT,
     GAS_SET_DEPOSIT_CAP,
@@ -214,6 +216,74 @@ def build_nft_transfer_tx(
         value=0,
         gas_estimate=GAS_TRANSFER_NFT,
         description=f"transferFrom({multisig}, {user_address}, {token_id})",
+    )
+
+
+_ERC20_APPROVE_ABI: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "name": "approve",
+        "stateMutability": "nonpayable",
+        "inputs": [
+            {"name": "spender", "type": "address"},
+            {"name": "amount", "type": "uint256"},
+        ],
+        "outputs": [{"name": "", "type": "bool"}],
+    }
+]
+
+_ERC4626_DEPOSIT_ABI: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "name": "deposit",
+        "stateMutability": "nonpayable",
+        "inputs": [
+            {"name": "assets", "type": "uint256"},
+            {"name": "receiver", "type": "address"},
+        ],
+        "outputs": [{"name": "shares", "type": "uint256"}],
+    }
+]
+
+
+def build_erc20_approve_tx(
+    token_address: str,
+    spender: str,
+    amount_wei: int,
+    description: str = "",
+) -> TransactionCall:
+    """Build ERC20.approve(spender, amount).
+
+    Standard ERC20 approval — works for USDC, WETH, any ERC20, including MYT shares.
+    """
+    data = encode_function_call(_ERC20_APPROVE_ABI, "approve", [spender, amount_wei])
+    return TransactionCall(
+        to=token_address,
+        data=data,
+        value=0,
+        gas_estimate=GAS_ERC20_APPROVE,
+        description=description or f"approve({spender}, {amount_wei}) on {token_address}",
+    )
+
+
+def build_erc4626_deposit_tx(
+    vault_address: str,
+    assets_wei: int,
+    receiver: str,
+    description: str = "",
+) -> TransactionCall:
+    """Build ERC4626.deposit(assets, receiver) — mint vault shares to receiver.
+
+    Used to deposit underlying (e.g. USDC) into the MYT vault and receive MYT
+    shares in the migration multisig.
+    """
+    data = encode_function_call(_ERC4626_DEPOSIT_ABI, "deposit", [assets_wei, receiver])
+    return TransactionCall(
+        to=vault_address,
+        data=data,
+        value=0,
+        gas_estimate=GAS_ERC4626_DEPOSIT,
+        description=description or f"deposit({assets_wei}, {receiver}) on vault {vault_address}",
     )
 
 

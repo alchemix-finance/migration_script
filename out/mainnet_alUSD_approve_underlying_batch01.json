@@ -1,0 +1,21 @@
+{
+  "version": "1.0",
+  "chainId": "1",
+  "createdAt": 1776207943986,
+  "meta": {
+    "name": "mainnet_alUSD_approve_underlying_batch1",
+    "description": "approve_underlying \u2014 batch 1 (1 calls)",
+    "txBuilderVersion": "1.17.0",
+    "createdFromSafeAddress": "0xF56D660138815fC5d7a06cd0E1630225E788293D",
+    "createdFromOwnerAddress": ""
+  },
+  "transactions": [
+    {
+      "to": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "value": "0",
+      "data": "0x095ea7b30000000000000000000000009b44efca3e2a707b63dc00ce79d646e5e5d24ba50000000000000000000000000000000000000000000000000000041c8fdc0493",
+      "contractMethod": null,
+      "contractInputsValues": null
+    }
+  ]
+}

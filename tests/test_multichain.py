@@ -1,459 +1,175 @@
-"""Multi-chain integration tests for CDP migration.
+"""Multi-chain integration tests for CDP migration (V3).
 
-This module tests the full multi-chain workflow including:
-- Chain selection across all scripts
-- Chain-specific configuration loading
-- Verification of chain-specific addresses before execution
-- Processing of chain-specific CSV files
+Covers:
+- All 3 chains (mainnet, optimism, arbitrum) are configured.
+- ChainName enum and CHAINS dict stay in sync.
+- Each chain's asset-specific addresses are distinct.
+- verify_asset_config raises ChainConfigError on empty fields, passes when populated.
+- get_csv_path resolves correct path per chain+asset.
+- All 6 real CSVs parse cleanly (validate_csv_file integration).
+- Chain isolation: loaded positions carry correct chain tag.
 """
 
-import pytest
+from __future__ import annotations
+
 from pathlib import Path
-from unittest.mock import patch
+
+import pytest
 
 from src.config import (
     CHAINS,
     VALID_CHAINS,
     ChainConfigError,
+    get_asset_config,
     get_chain_config,
     get_csv_path,
-    get_required_config_fields,
     get_supported_chains,
     is_valid_address,
-    validate_chain_config,
-    verify_chain_config,
+    validate_asset_config,
+    verify_asset_config,
 )
-from src.types import ChainName
+from src.types import AssetType, ChainName, PositionMigration
 from src.validation import validate_csv_file
 
 
+EXPECTED_CHAINS = {"mainnet", "optimism", "arbitrum"}
+EXPECTED_CHAIN_IDS = {"mainnet": 1, "optimism": 10, "arbitrum": 42161}
+
+
 class TestValidChains:
-    """Tests for valid chain constants and types."""
+    def test_chains_dict_has_all_three(self) -> None:
+        assert set(CHAINS.keys()) == EXPECTED_CHAINS
 
-    def test_valid_chains_constant(self) -> None:
-        """Test that VALID_CHAINS contains expected chains."""
-        assert VALID_CHAINS == ("mainnet", "optimism", "arbitrum")
+    def test_valid_chains_matches_chains_dict(self) -> None:
+        assert set(VALID_CHAINS) == EXPECTED_CHAINS
 
-    def test_chain_name_enum_matches_valid_chains(self) -> None:
-        """Test that ChainName enum values match VALID_CHAINS."""
-        enum_values = {chain.value for chain in ChainName}
-        assert enum_values == set(VALID_CHAINS)
+    def test_get_supported_chains_matches(self) -> None:
+        assert set(get_supported_chains()) == EXPECTED_CHAINS
 
-    def test_chains_dict_keys_match_valid_chains(self) -> None:
-        """Test that CHAINS dict keys match VALID_CHAINS."""
-        assert set(CHAINS.keys()) == set(VALID_CHAINS)
+    def test_chain_name_enum_in_sync(self) -> None:
+        """ChainName enum values must match CHAINS keys — drift detection."""
+        enum_values = {c.value for c in ChainName}
+        assert enum_values == EXPECTED_CHAINS
 
 
 class TestChainConfigLoading:
-    """Tests for chain-specific configuration loading."""
+    @pytest.mark.parametrize("chain,expected_cid", list(EXPECTED_CHAIN_IDS.items()))
+    def test_chain_id_correct(self, chain: str, expected_cid: int) -> None:
+        assert get_chain_config(chain)["chain_id"] == expected_cid
 
-    @pytest.mark.parametrize("chain", VALID_CHAINS)
-    def test_get_chain_config_all_chains(self, chain: str) -> None:
-        """Test that configuration can be loaded for all valid chains."""
-        config = get_chain_config(chain)
-        assert "chain_id" in config
-        assert "multisig" in config
-        assert "cdp_usd" in config
-        assert "cdp_eth" in config
-        assert "nft_usd" in config
-        assert "nft_eth" in config
-
-    def test_mainnet_chain_id(self) -> None:
-        """Test mainnet has correct chain ID."""
-        config = get_chain_config("mainnet")
-        assert config["chain_id"] == 1
-
-    def test_optimism_chain_id(self) -> None:
-        """Test optimism has correct chain ID."""
-        config = get_chain_config("optimism")
-        assert config["chain_id"] == 10
-
-    def test_arbitrum_chain_id(self) -> None:
-        """Test arbitrum has correct chain ID."""
-        config = get_chain_config("arbitrum")
-        assert config["chain_id"] == 42161
-
-    def test_invalid_chain_raises_error(self) -> None:
-        """Test that invalid chain raises ValueError."""
-        with pytest.raises(ValueError, match="Unsupported chain"):
-            get_chain_config("polygon")
+    @pytest.mark.parametrize("chain", list(EXPECTED_CHAINS))
+    def test_multisig_is_valid_address(self, chain: str) -> None:
+        assert is_valid_address(get_chain_config(chain)["multisig"])
 
 
-class TestAddressValidation:
-    """Tests for address validation function."""
+class TestAssetConfigs:
+    @pytest.mark.parametrize("chain", list(EXPECTED_CHAINS))
+    @pytest.mark.parametrize("asset", [AssetType.USD, AssetType.ETH])
+    def test_asset_addresses_populated(self, chain: str, asset: AssetType) -> None:
+        cfg = get_asset_config(chain, asset)
+        for field in ("alchemist", "myt", "al_token", "underlying", "nft"):
+            value = cfg.get(field, "")
+            assert is_valid_address(value), f"{chain}/{asset.value}/{field} not populated"
 
-    def test_valid_address(self) -> None:
-        """Test that valid addresses return True."""
-        valid = "0x1234567890123456789012345678901234567890"
-        assert is_valid_address(valid) is True
+    def test_alchemist_addresses_distinct_across_chains(self) -> None:
+        """Mainnet alchemists differ from L2 alchemists."""
+        mainnet_usd = get_asset_config("mainnet", AssetType.USD)["alchemist"]
+        arbitrum_usd = get_asset_config("arbitrum", AssetType.USD)["alchemist"]
+        assert mainnet_usd != arbitrum_usd
 
-    def test_valid_address_lowercase(self) -> None:
-        """Test that lowercase hex addresses are valid."""
-        valid = "0xabcdef0123456789abcdef0123456789abcdef01"
-        assert is_valid_address(valid) is True
-
-    def test_valid_address_uppercase(self) -> None:
-        """Test that uppercase hex addresses are valid."""
-        valid = "0xABCDEF0123456789ABCDEF0123456789ABCDEF01"
-        assert is_valid_address(valid) is True
-
-    def test_empty_string_invalid(self) -> None:
-        """Test that empty string is invalid."""
-        assert is_valid_address("") is False
-
-    def test_none_invalid(self) -> None:
-        """Test that None is invalid."""
-        assert is_valid_address(None) is False
-
-    def test_missing_0x_prefix(self) -> None:
-        """Test that address without 0x prefix is invalid."""
-        assert is_valid_address("1234567890123456789012345678901234567890") is False
-
-    def test_short_address(self) -> None:
-        """Test that short address is invalid."""
-        assert is_valid_address("0x123456") is False
-
-    def test_long_address(self) -> None:
-        """Test that long address is invalid."""
-        assert is_valid_address("0x12345678901234567890123456789012345678901234") is False
-
-    def test_non_hex_characters(self) -> None:
-        """Test that address with non-hex characters is invalid."""
-        assert is_valid_address("0xGGGG567890123456789012345678901234567890") is False
+    def test_usd_eth_addresses_differ_within_chain(self) -> None:
+        for chain in EXPECTED_CHAINS:
+            usd = get_asset_config(chain, AssetType.USD)
+            eth = get_asset_config(chain, AssetType.ETH)
+            for field in ("alchemist", "myt", "al_token", "underlying"):
+                assert usd[field] != eth[field], f"{chain} {field} collides between USD and ETH"
 
 
-class TestVerifyChainConfig:
-    """Tests for chain configuration verification."""
+class TestAssetConfigVerification:
+    @pytest.mark.parametrize("chain", list(EXPECTED_CHAINS))
+    @pytest.mark.parametrize("asset", [AssetType.USD, AssetType.ETH])
+    def test_verify_passes_for_populated(self, chain: str, asset: AssetType) -> None:
+        verify_asset_config(chain, asset)  # must not raise
 
-    def test_verify_raises_for_empty_multisig(self) -> None:
-        """Test that missing multisig raises ChainConfigError."""
-        # With default empty configs, should raise error
-        with pytest.raises(ChainConfigError) as exc_info:
-            verify_chain_config("mainnet")
-        assert "multisig" in exc_info.value.missing_fields
+    @pytest.mark.parametrize("chain", list(EXPECTED_CHAINS))
+    @pytest.mark.parametrize("asset", [AssetType.USD, AssetType.ETH])
+    def test_validate_returns_empty_for_populated(self, chain: str, asset: AssetType) -> None:
+        assert validate_asset_config(chain, asset) == []
 
-    def test_verify_raises_for_usd_fields_when_has_usd(self) -> None:
-        """Test that missing USD fields raise error when has_usd_positions=True."""
-        with pytest.raises(ChainConfigError) as exc_info:
-            verify_chain_config("mainnet", has_usd_positions=True, has_eth_positions=False)
-        missing = exc_info.value.missing_fields
-        assert "cdp_usd" in missing
-        assert "nft_usd" in missing
-
-    def test_verify_raises_for_eth_fields_when_has_eth(self) -> None:
-        """Test that missing ETH fields raise error when has_eth_positions=True."""
-        with pytest.raises(ChainConfigError) as exc_info:
-            verify_chain_config("mainnet", has_usd_positions=False, has_eth_positions=True)
-        missing = exc_info.value.missing_fields
-        assert "cdp_eth" in missing
-        assert "nft_eth" in missing
-
-    def test_verify_skips_usd_fields_when_no_usd(self) -> None:
-        """Test that USD fields are not checked when has_usd_positions=False."""
-        with pytest.raises(ChainConfigError) as exc_info:
-            verify_chain_config("mainnet", has_usd_positions=False, has_eth_positions=True)
-        missing = exc_info.value.missing_fields
-        # Should NOT include USD fields
-        assert "cdp_usd" not in missing
-        assert "nft_usd" not in missing
-
-    def test_verify_skips_eth_fields_when_no_eth(self) -> None:
-        """Test that ETH fields are not checked when has_eth_positions=False."""
-        with pytest.raises(ChainConfigError) as exc_info:
-            verify_chain_config("mainnet", has_usd_positions=True, has_eth_positions=False)
-        missing = exc_info.value.missing_fields
-        # Should NOT include ETH fields
-        assert "cdp_eth" not in missing
-        assert "nft_eth" not in missing
-
-    def test_verify_require_all_checks_everything(self) -> None:
-        """Test that require_all=True checks all address fields."""
-        with pytest.raises(ChainConfigError) as exc_info:
-            verify_chain_config(
-                "mainnet",
-                has_usd_positions=False,
-                has_eth_positions=False,
-                require_all=True,
-            )
-        missing = exc_info.value.missing_fields
-        assert "cdp_usd" in missing
-        assert "cdp_eth" in missing
-        assert "nft_usd" in missing
-        assert "nft_eth" in missing
-
-    @patch.dict(
-        "src.config.CHAINS",
-        {
-            "mainnet": {
-                "chain_id": 1,
-                "multisig": "0x1234567890123456789012345678901234567890",
-                "cdp_usd": "0x2234567890123456789012345678901234567890",
-                "cdp_eth": "0x3234567890123456789012345678901234567890",
-                "nft_usd": "0x4234567890123456789012345678901234567890",
-                "nft_eth": "0x5234567890123456789012345678901234567890",
-                "collateral_usd": "0x6234567890123456789012345678901234567890",
-                "collateral_eth": "0x7234567890123456789012345678901234567890",
-            }
-        },
-    )
-    def test_verify_passes_with_valid_config(self) -> None:
-        """Test that verify passes when all required addresses are set."""
-        # Should not raise any exception
-        verify_chain_config("mainnet", has_usd_positions=True, has_eth_positions=True)
-
-
-class TestChainConfigError:
-    """Tests for ChainConfigError exception."""
-
-    def test_error_contains_chain(self) -> None:
-        """Test that error contains chain name."""
-        error = ChainConfigError("mainnet", ["multisig"])
-        assert error.chain == "mainnet"
-
-    def test_error_contains_missing_fields(self) -> None:
-        """Test that error contains missing fields list."""
-        error = ChainConfigError("mainnet", ["multisig", "cdp_usd"])
-        assert error.missing_fields == ["multisig", "cdp_usd"]
-
-    def test_error_message_format(self) -> None:
-        """Test that error message is properly formatted."""
-        error = ChainConfigError("optimism", ["multisig", "cdp_usd"])
-        assert "optimism" in str(error)
-        assert "multisig" in str(error)
-        assert "cdp_usd" in str(error)
-
-    def test_custom_message(self) -> None:
-        """Test that custom message overrides default."""
-        error = ChainConfigError("mainnet", ["multisig"], message="Custom error")
-        assert str(error) == "Custom error"
-
-
-class TestGetRequiredConfigFields:
-    """Tests for get_required_config_fields function."""
-
-    def test_always_includes_multisig(self) -> None:
-        """Test that multisig is always required."""
-        fields = get_required_config_fields(has_usd_positions=False, has_eth_positions=False)
-        assert "multisig" in fields
-
-    def test_includes_usd_fields_when_has_usd(self) -> None:
-        """Test that USD fields are included when has_usd_positions=True."""
-        fields = get_required_config_fields(has_usd_positions=True, has_eth_positions=False)
-        assert "cdp_usd" in fields
-        assert "nft_usd" in fields
-
-    def test_includes_eth_fields_when_has_eth(self) -> None:
-        """Test that ETH fields are included when has_eth_positions=True."""
-        fields = get_required_config_fields(has_usd_positions=False, has_eth_positions=True)
-        assert "cdp_eth" in fields
-        assert "nft_eth" in fields
-
-    def test_includes_all_when_both(self) -> None:
-        """Test that all fields are included when both position types exist."""
-        fields = get_required_config_fields(has_usd_positions=True, has_eth_positions=True)
-        assert "multisig" in fields
-        assert "cdp_usd" in fields
-        assert "nft_usd" in fields
-        assert "cdp_eth" in fields
-        assert "nft_eth" in fields
+    def test_chain_config_error_attributes(self) -> None:
+        err = ChainConfigError("mainnet", ["alchemist"])
+        assert err.chain == "mainnet"
+        assert err.missing_fields == ["alchemist"]
 
 
 class TestCSVPathPerChain:
-    """Tests for chain-specific CSV path resolution."""
+    @pytest.mark.parametrize("chain", list(EXPECTED_CHAINS))
+    @pytest.mark.parametrize("asset,prefix", [(AssetType.USD, "alUSD"), (AssetType.ETH, "alETH")])
+    def test_path_naming(self, chain: str, asset: AssetType, prefix: str) -> None:
+        path = get_csv_path(chain, asset)
+        assert f"{prefix}Values-sum-and-debt-{chain}.csv" in str(path)
 
-    @pytest.mark.parametrize("chain", VALID_CHAINS)
-    def test_csv_path_format(self, chain: str) -> None:
-        """Test that CSV path is correctly formatted for each chain."""
-        path = get_csv_path(chain)
-        assert path.name == f"{chain}.csv"
-        assert path.parent.name == "data"
-
-    def test_mainnet_csv_exists(self, project_root: Path) -> None:
-        """Test that mainnet.csv exists in data directory."""
-        csv_path = project_root / "data" / "mainnet.csv"
-        assert csv_path.exists(), f"Expected {csv_path} to exist"
-
-    def test_optimism_csv_exists(self, project_root: Path) -> None:
-        """Test that optimism.csv exists in data directory."""
-        csv_path = project_root / "data" / "optimism.csv"
-        assert csv_path.exists(), f"Expected {csv_path} to exist"
-
-    def test_arbitrum_csv_exists(self, project_root: Path) -> None:
-        """Test that arbitrum.csv exists in data directory."""
-        csv_path = project_root / "data" / "arbitrum.csv"
-        assert csv_path.exists(), f"Expected {csv_path} to exist"
+    @pytest.mark.parametrize("chain", list(EXPECTED_CHAINS))
+    @pytest.mark.parametrize("asset", [AssetType.USD, AssetType.ETH])
+    def test_csv_file_exists(self, chain: str, asset: AssetType) -> None:
+        assert get_csv_path(chain, asset).exists(), f"missing CSV for {chain}/{asset.value}"
 
 
 class TestMultiChainCSVValidation:
-    """Tests for validating CSV files across all chains."""
+    """End-to-end: every chain+asset CSV loads cleanly and produces correctly-tagged positions."""
 
-    @pytest.fixture
-    def project_root(self) -> Path:
-        """Return the project root directory."""
-        return Path(__file__).parent.parent
+    @pytest.mark.parametrize("chain", sorted(EXPECTED_CHAINS))
+    @pytest.mark.parametrize("asset", [AssetType.USD, AssetType.ETH])
+    def test_csv_parses_cleanly(self, chain: str, asset: AssetType) -> None:
+        csv_path = get_csv_path(chain, asset)
+        result = validate_csv_file(csv_path, chain, asset)
+        assert result.is_valid, (
+            f"{chain}/{asset.value}: {len(result.errors)} errors; first: {result.errors[:1]}"
+        )
+        assert result.total_positions > 0
 
-    def test_validate_mainnet_csv(self, project_root: Path) -> None:
-        """Test that mainnet.csv validates successfully."""
-        csv_path = project_root / "data" / "mainnet.csv"
-        if csv_path.exists():
-            result = validate_csv_file(csv_path, "mainnet")
-            assert result.is_valid, f"Validation errors: {result.errors}"
-            assert result.total_positions > 0
+    @pytest.mark.parametrize("chain", sorted(EXPECTED_CHAINS))
+    @pytest.mark.parametrize("asset", [AssetType.USD, AssetType.ETH])
+    def test_chain_tag_propagates(self, chain: str, asset: AssetType) -> None:
+        csv_path = get_csv_path(chain, asset)
+        result = validate_csv_file(csv_path, chain, asset)
+        assert result.is_valid
+        assert all(p.chain == chain for p in result.positions[:50])
 
-    def test_validate_optimism_csv(self, project_root: Path) -> None:
-        """Test that optimism.csv validates successfully."""
-        csv_path = project_root / "data" / "optimism.csv"
-        if csv_path.exists():
-            result = validate_csv_file(csv_path, "optimism")
-            assert result.is_valid, f"Validation errors: {result.errors}"
-            assert result.total_positions > 0
+    @pytest.mark.parametrize("chain", sorted(EXPECTED_CHAINS))
+    @pytest.mark.parametrize("asset", [AssetType.USD, AssetType.ETH])
+    def test_asset_tag_propagates(self, chain: str, asset: AssetType) -> None:
+        csv_path = get_csv_path(chain, asset)
+        result = validate_csv_file(csv_path, chain, asset)
+        assert all(p.asset_type == asset for p in result.positions[:50])
 
-    def test_validate_arbitrum_csv(self, project_root: Path) -> None:
-        """Test that arbitrum.csv validates successfully."""
-        csv_path = project_root / "data" / "arbitrum.csv"
-        if csv_path.exists():
-            result = validate_csv_file(csv_path, "arbitrum")
-            assert result.is_valid, f"Validation errors: {result.errors}"
-            assert result.total_positions > 0
-
-    def test_positions_have_correct_chain(self, project_root: Path) -> None:
-        """Test that positions from validation have correct chain assigned."""
-        for chain in VALID_CHAINS:
-            csv_path = project_root / "data" / f"{chain}.csv"
-            if csv_path.exists():
-                result = validate_csv_file(csv_path, chain)
-                for position in result.positions:
-                    assert position.chain == chain
-
-
-class TestMultiChainWorkflow:
-    """Integration tests for multi-chain workflow."""
-
-    @pytest.fixture
-    def project_root(self) -> Path:
-        """Return the project root directory."""
-        return Path(__file__).parent.parent
-
-    def test_full_workflow_mainnet(self, project_root: Path) -> None:
-        """Test full workflow for mainnet chain."""
-        chain = "mainnet"
-
-        # 1. Load chain config
-        config = get_chain_config(chain)
-        assert config["chain_id"] == 1
-
-        # 2. Get CSV path
-        csv_path = get_csv_path(chain)
-        assert csv_path.name == "mainnet.csv"
-
-        # 3. Validate CSV (if exists)
-        if csv_path.exists():
-            result = validate_csv_file(csv_path, chain)
-            assert result.is_valid
-
-            # 4. Check what config would be needed
-            has_usd = result.usd_token_count > 0
-            has_eth = result.eth_token_count > 0
-            required = get_required_config_fields(has_usd, has_eth)
-
-            # Multisig is always required
-            assert "multisig" in required
-
-    def test_full_workflow_optimism(self, project_root: Path) -> None:
-        """Test full workflow for optimism chain."""
-        chain = "optimism"
-
-        # 1. Load chain config
-        config = get_chain_config(chain)
-        assert config["chain_id"] == 10
-
-        # 2. Get CSV path
-        csv_path = get_csv_path(chain)
-        assert csv_path.name == "optimism.csv"
-
-        # 3. Validate CSV (if exists)
-        if csv_path.exists():
-            result = validate_csv_file(csv_path, chain)
-            assert result.is_valid
-
-    def test_full_workflow_arbitrum(self, project_root: Path) -> None:
-        """Test full workflow for arbitrum chain."""
-        chain = "arbitrum"
-
-        # 1. Load chain config
-        config = get_chain_config(chain)
-        assert config["chain_id"] == 42161
-
-        # 2. Get CSV path
-        csv_path = get_csv_path(chain)
-        assert csv_path.name == "arbitrum.csv"
-
-        # 3. Validate CSV (if exists)
-        if csv_path.exists():
-            result = validate_csv_file(csv_path, chain)
-            assert result.is_valid
-
-    @pytest.mark.parametrize("chain", VALID_CHAINS)
-    def test_chain_isolation(self, chain: str, project_root: Path) -> None:
-        """Test that each chain's workflow is isolated from others."""
-        csv_path = project_root / "data" / f"{chain}.csv"
-        if not csv_path.exists():
-            pytest.skip(f"CSV not found for {chain}")
-
-        result = validate_csv_file(csv_path, chain)
-
-        # Verify all positions belong to this chain
-        for position in result.positions:
-            assert position.chain == chain, f"Position chain mismatch: expected {chain}, got {position.chain}"
+    def test_cross_chain_position_counts_summary(self) -> None:
+        """Spot-check that totals match known snapshot counts (captured 2026-04-14)."""
+        snapshots = {
+            ("mainnet", AssetType.USD): 1245,
+            ("mainnet", AssetType.ETH): 714,
+            ("optimism", AssetType.USD): 3624,
+            ("optimism", AssetType.ETH): 864,
+            ("arbitrum", AssetType.USD): 1417,
+            ("arbitrum", AssetType.ETH): 375,  # row 105 removed (underwater user)
+        }
+        for (chain, asset), expected_count in snapshots.items():
+            csv_path = get_csv_path(chain, asset)
+            result = validate_csv_file(csv_path, chain, asset)
+            assert result.total_positions == expected_count, (
+                f"{chain}/{asset.value}: expected {expected_count}, got {result.total_positions}"
+            )
 
 
-class TestChainSpecificAddressVerification:
-    """Tests for chain-specific address verification before execution."""
+class TestChainIsolation:
+    """Positions from one chain's CSV must not carry other chains' metadata."""
 
-    def test_verify_requires_multisig_for_all_chains(self) -> None:
-        """Test that multisig is required for all chains."""
-        for chain in VALID_CHAINS:
-            with pytest.raises(ChainConfigError) as exc_info:
-                verify_chain_config(chain, has_usd_positions=False, has_eth_positions=False)
-            # Even with no positions, multisig should be required
-            assert "multisig" in exc_info.value.missing_fields
-
-    @pytest.mark.parametrize("chain", VALID_CHAINS)
-    def test_verify_usd_only_positions(self, chain: str) -> None:
-        """Test verification when only USD positions exist."""
-        with pytest.raises(ChainConfigError) as exc_info:
-            verify_chain_config(chain, has_usd_positions=True, has_eth_positions=False)
-
-        missing = exc_info.value.missing_fields
-        # Should require USD contracts but not ETH
-        assert "cdp_usd" in missing
-        assert "nft_usd" in missing
-        assert "cdp_eth" not in missing
-        assert "nft_eth" not in missing
-
-    @pytest.mark.parametrize("chain", VALID_CHAINS)
-    def test_verify_eth_only_positions(self, chain: str) -> None:
-        """Test verification when only ETH positions exist."""
-        with pytest.raises(ChainConfigError) as exc_info:
-            verify_chain_config(chain, has_usd_positions=False, has_eth_positions=True)
-
-        missing = exc_info.value.missing_fields
-        # Should require ETH contracts but not USD
-        assert "cdp_eth" in missing
-        assert "nft_eth" in missing
-        assert "cdp_usd" not in missing
-        assert "nft_usd" not in missing
-
-    @pytest.mark.parametrize("chain", VALID_CHAINS)
-    def test_verify_mixed_positions(self, chain: str) -> None:
-        """Test verification when both USD and ETH positions exist."""
-        with pytest.raises(ChainConfigError) as exc_info:
-            verify_chain_config(chain, has_usd_positions=True, has_eth_positions=True)
-
-        missing = exc_info.value.missing_fields
-        # Should require all contracts
-        assert "multisig" in missing
-        assert "cdp_usd" in missing
-        assert "nft_usd" in missing
-        assert "cdp_eth" in missing
-        assert "nft_eth" in missing
+    def test_loading_arbitrum_does_not_contaminate_mainnet(self) -> None:
+        arb_result = validate_csv_file(
+            get_csv_path("arbitrum", AssetType.USD), "arbitrum", AssetType.USD,
+        )
+        mainnet_result = validate_csv_file(
+            get_csv_path("mainnet", AssetType.USD), "mainnet", AssetType.USD,
+        )
+        assert all(p.chain == "arbitrum" for p in arb_result.positions[:20])
+        assert all(p.chain == "mainnet" for p in mainnet_result.positions[:20])

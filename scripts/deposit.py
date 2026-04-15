@@ -1,6 +1,6 @@
 import src.env  # Load .env on startup
 #!/usr/bin/env python3
-"""Step 1: Deposit MYT and create NFT positions (no mint).
+"""Phase 1: Deposit MYT and create NFT positions (no mint).
 
 Usage:
     ape run deposit --chain mainnet --asset usd
@@ -30,7 +30,8 @@ from src.gas import (
     format_batch_summary,
     verify_batch_gas_limits,
 )
-from src.safe import ProposeToSafe, format_safe_batch
+from src.executor import make_executor
+from src.safe import ProposeToSafe, format_safe_batch  # ProposeToSafe kept for legacy --mode propose path
 from src.types import AssetType
 from src.validation import format_validation_errors, validate_csv_file
 
@@ -42,6 +43,10 @@ from src.validation import format_validation_errors, validate_csv_file
 @click.option("--yes", "-y", is_flag=True, default=False)
 @click.option("--dry-run", is_flag=True, default=False)
 @click.option("--skip-validation", is_flag=True, default=False)
+@click.option("--mode", type=click.Choice(["json", "impersonate", "propose"]), default="json",
+              help="json=emit Safe Builder JSON; impersonate=fork execute; propose=legacy API")
+@click.option("--resume", is_flag=True, default=False,
+              help="Skip CSV positions whose NFT is already minted (count-based: skips first NFT.totalSupply() rows).")
 @ape_cli_context()
 def cli(
     cli_ctx,
@@ -51,6 +56,8 @@ def cli(
     yes: bool,
     dry_run: bool,
     skip_validation: bool,
+    mode: str,
+    resume: bool,
 ) -> None:
     """Step 1: Deposit MYT to create NFT positions (minting is separate)."""
     asset_type = AssetType.USD if asset == "usd" else AssetType.ETH
@@ -117,14 +124,49 @@ def cli(
 
     alchemist = asset_config.get("alchemist", "") or "0x" + "0" * 40
 
+    # Read on-chain depositCap so we don't emit a setDepositCap that would
+    # lower it (V3 alchemist reverts on downward changes).
+    live_cap = 0
+    try:
+        from src.preflight import read_deposit_cap
+        live_cap = read_deposit_cap(chain, alchemist)
+        click.echo(f"  on-chain depositCap(): {live_cap:,} wei")
+    except Exception as e:
+        click.echo(click.style(f"  warning: could not read live depositCap ({e}); defaulting to 0", fg="yellow"))
+
+    positions_to_deposit = result.positions
+    if resume:
+        # NFTs are minted in CSV order. Read NFT.totalSupply() to learn how
+        # many positions have already been deposited and skip the prefix.
+        click.echo(click.style("\n[1.5/4] --resume: reading current NFT count...", fg="cyan", bold=True))
+        import os
+        from web3 import Web3
+        from eth_utils import keccak
+        from eth_abi import decode
+        from src.preflight import _rpc_url
+        rpc_url = os.environ.get("FORK_RPC_URL") or _rpc_url(chain)
+        w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 30}))
+        nft_addr = asset_config.get("nft", "")
+        sel = keccak(text="totalSupply()")[:4]
+        raw = w3.eth.call({"to": Web3.to_checksum_address(nft_addr), "data": "0x" + sel.hex()})
+        already_minted = int(decode(["uint256"], raw)[0])
+        click.echo(f"  NFT.totalSupply(): {already_minted}")
+        click.echo(f"  CSV positions:    {len(result.positions)}")
+        if already_minted >= len(result.positions):
+            click.echo(click.style("All positions already deposited. Nothing to do.", fg="yellow"))
+            raise SystemExit(0)
+        positions_to_deposit = result.positions[already_minted:]
+        click.echo(f"  resuming from CSV row {already_minted + 1}, processing {len(positions_to_deposit)} remaining")
+
     # Build deposit batches
     click.echo(click.style("\n[2/4] Building deposit batches...", fg="cyan", bold=True))
 
     batches = create_deposit_batches(
-        positions=result.positions,
+        positions=positions_to_deposit,
         alchemist_address=alchemist,
         multisig=multisig,
         chain=chain,
+        current_deposit_cap_wei=live_cap,
     )
 
     ok, errors = verify_batch_gas_limits(batches, chain=chain)
@@ -196,7 +238,10 @@ def cli(
 
     chain_id = chain_config["chain_id"]
     safe_txs = format_safe_batch(batches, chain_id=chain_id)
-    proposer = ProposeToSafe(safe_address=multisig, chain_id=chain_id)
+    proposer = make_executor(
+        mode, batches=batches, safe_address=multisig, chain_id=chain_id,
+        chain=chain, asset_type=asset_type, step_name="deposit",
+    )
 
     # Checkpoint mode: propose one batch at a time; pause for verification before each next batch.
     all_results: list = []
@@ -211,7 +256,7 @@ def cli(
                 fg="yellow", bold=True,
             ))
             click.echo(f"  Safe: {safe_url}")
-            if not click.confirm(
+            if not yes and not click.confirm(
                 click.style(f"Propose batch {i + 1}/{n_batches}?", fg="yellow")
             ):
                 click.echo(click.style(

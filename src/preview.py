@@ -76,7 +76,8 @@ def print_migration_plan(
     click.echo(f"  Multisig burn:    {_fmt_wei(plan.remaining_to_burn_wei)}  (manual)")
 
     all_batches = (
-        plan.deposit_batches + plan.mint_batches
+        plan.approve_underlying_batches + plan.myt_deposit_batches + plan.approve_myt_batches
+        + plan.deposit_batches + plan.mint_batches
         + plan.transfer_batches + plan.credit_batches
     )
 
@@ -100,29 +101,50 @@ def print_migration_plan(
                     click.echo(f"      ... +{len(batch.calls) - 5} more")
 
     click.echo(f"\n{SUB}")
-    click.echo(click.style("Step 1 — Deposit (deposit.py)", fg="white", bold=True))
+    click.echo(click.style("Phase A — Approve underlying → MYT (approve_underlying.py)", fg="white", bold=True))
+    click.echo(SUB)
+    _print_section("ApproveUnderlying", plan.approve_underlying_batches)
+
+    click.echo(f"\n{SUB}")
+    click.echo(click.style("Phase B — Deposit underlying → MYT (deposit_myt.py)", fg="white", bold=True))
+    click.echo(SUB)
+    _print_section("DepositMYT", plan.myt_deposit_batches)
+
+    click.echo(f"\n{SUB}")
+    click.echo(click.style("Phase C — Approve MYT → Alchemist (approve_myt.py)", fg="white", bold=True))
+    click.echo(SUB)
+    _print_section("ApproveMYT", plan.approve_myt_batches)
+
+    click.echo(f"\n{SUB}")
+    click.echo(click.style("Phase D — alToken minter whitelist swap (set_whitelist.py)", fg="white", bold=True))
+    click.echo(SUB)
+    click.echo("  Not included in this plan preview — run `ape run set_whitelist` separately.")
+    click.echo("  Signer = alToken owner (NOT migration multisig). See SET_WHITELIST_REFERENCE.md.")
+
+    click.echo(f"\n{SUB}")
+    click.echo(click.style("Phase 1 — Alchemist deposit (deposit.py)", fg="white", bold=True))
     click.echo(SUB)
     _print_section("Deposit", plan.deposit_batches)
 
     click.echo(f"\n{SUB}")
-    click.echo(click.style("Step 2 — Mint (mint.py)", fg="white", bold=True))
+    click.echo(click.style("Phase 2 — Mint (mint.py)", fg="white", bold=True))
     click.echo(SUB)
     _print_section("Mint", plan.mint_batches)
     if not plan.mint_batches:
         click.echo("  (requires token ID map — run read_ids first)")
 
     click.echo(f"\n{SUB}")
-    click.echo(click.style("Step 3 — Verify (verify.py)", fg="white", bold=True))
+    click.echo(click.style("Phase 3 — Verify (verify.py)", fg="white", bold=True))
     click.echo(SUB)
     click.echo("  Team verification step — no batches.")
 
     click.echo(f"\n{SUB}")
-    click.echo(click.style("Step 4 — Distribute NFTs (distribute.py)", fg="white", bold=True))
+    click.echo(click.style("Phase 4 — Distribute NFTs (distribute.py)", fg="white", bold=True))
     click.echo(SUB)
     _print_section("NFT Transfer", plan.transfer_batches)
 
     click.echo(f"\n{SUB}")
-    click.echo(click.style("Step 5 — Credit (credit.py)", fg="white", bold=True))
+    click.echo(click.style("Phase 5 — Credit (credit.py)", fg="white", bold=True))
     click.echo(SUB)
     _print_section("Credit", plan.credit_batches)
 
@@ -130,6 +152,9 @@ def print_migration_plan(
     click.echo(f"\n{SUB}")
     click.echo(click.style("Totals", fg="white", bold=True))
     click.echo(SUB)
+    click.echo(f"  ApproveUnderlying:  {len(plan.approve_underlying_batches)}")
+    click.echo(f"  DepositMYT:         {len(plan.myt_deposit_batches)}")
+    click.echo(f"  ApproveMYT:         {len(plan.approve_myt_batches)}")
     click.echo(f"  Deposit batches:    {len(plan.deposit_batches)}")
     click.echo(f"  Mint batches:       {len(plan.mint_batches)}")
     click.echo(f"  Transfer batches:   {len(plan.transfer_batches)}")

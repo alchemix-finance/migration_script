@@ -1,434 +1,239 @@
-"""Tests for the preview module."""
+"""Tests for the preview module (V3).
+
+V1 had a `TransactionPreview` dataclass and 12 individual `format_*` helpers.
+V3 preview is a single procedural function `print_migration_plan(plan,
+chain_config, asset_config, verbose=False)` that prints to click.echo, backed
+by private formatters `_fmt_wei`, `_fmt_gas`, `_addr`, `_batch_row`.
+
+Per user direction: test the private formatters directly (they are the actual
+correctness surface), plus capsys integration over print_migration_plan for
+the rendering pipeline.
+"""
+
+from __future__ import annotations
 
 import pytest
 
-from src.preview import (
-    TransactionPreview,
-    create_transaction_previews,
-    format_address,
-    format_batch_header,
-    format_batch_totals,
-    format_confirmation_prompt,
-    format_execution_progress,
-    format_final_summary,
-    format_gas,
-    format_position_summary,
-    format_preview_footer,
-    format_preview_header,
-    format_transaction_line,
-    format_wei_to_display,
+from src.preview import _addr, _batch_row, _fmt_gas, _fmt_wei, print_migration_plan
+from src.types import (
+    AssetType,
+    MigrationPlan,
+    PositionMigration,
+    TransactionBatch,
+    TransactionCall,
 )
-from src.types import PositionMigration, TransactionBatch, TransactionCall
 
 
-class TestFormatWeiToDisplay:
-    """Tests for format_wei_to_display function."""
-
-    def test_zero_value(self):
-        """Test zero wei returns '0.0'."""
-        assert format_wei_to_display(0) == "0.0"
-
-    def test_one_wei(self):
-        """Test one wei displays correctly."""
-        result = format_wei_to_display(1)
-        # Very small number - might be rounded to 0 or show very small decimal
-        assert result == "0" or "0.0" in result
-
-    def test_one_ether(self):
-        """Test 1 ETH (10^18 wei) displays as 1."""
-        result = format_wei_to_display(10**18)
-        assert result == "1"
-
-    def test_large_value_with_decimals(self):
-        """Test large value with decimal places."""
-        # 1234.567890 ETH
-        wei = int(1234.567890 * 10**18)
-        result = format_wei_to_display(wei)
-        assert "1,234" in result
-        assert "5678" in result
-
-    def test_thousands_separator(self):
-        """Test that large integer parts have commas."""
-        # 1,000,000 tokens
-        wei = 1_000_000 * 10**18
-        result = format_wei_to_display(wei)
-        assert "1,000,000" in result
-
-    def test_trailing_zeros_removed(self):
-        """Test that trailing zeros are removed from decimals."""
-        # 1.5 ETH - should not show as 1.500000
-        wei = int(1.5 * 10**18)
-        result = format_wei_to_display(wei)
-        assert result == "1.5"
+# ---------------------------------------------------------------------------
+# Direct formatter tests
+# ---------------------------------------------------------------------------
 
 
-class TestFormatGas:
-    """Tests for format_gas function."""
+class TestFmtWei:
+    def test_zero(self) -> None:
+        assert _fmt_wei(0) == "0"
 
-    def test_small_gas(self):
-        """Test small gas value."""
-        assert format_gas(1000) == "1,000"
+    def test_one_unit(self) -> None:
+        assert _fmt_wei(10**18) == "1"
 
-    def test_large_gas(self):
-        """Test large gas value with commas."""
-        assert format_gas(15_200_000) == "15,200,000"
+    def test_fractional(self) -> None:
+        # 1.5 tokens exactly
+        assert _fmt_wei(15 * 10**17) == "1.5"
 
-    def test_zero_gas(self):
-        """Test zero gas."""
-        assert format_gas(0) == "0"
+    def test_trailing_zeros_stripped(self) -> None:
+        # 1.500000 would show as "1.5"
+        assert _fmt_wei(10**18) == "1"
 
+    def test_large_amount_has_comma_separators(self) -> None:
+        # 1,234,567.123456 tokens
+        wei = 1_234_567 * 10**18 + 123_456_000_000_000_000
+        out = _fmt_wei(wei)
+        assert "," in out
+        assert "1,234,567" in out
 
-class TestFormatAddress:
-    """Tests for format_address function."""
-
-    def test_truncate_address(self):
-        """Test address truncation."""
-        addr = "0x1234567890123456789012345678901234567890"
-        result = format_address(addr, truncate=True)
-        assert result == "0x1234...7890"
-
-    def test_full_address(self):
-        """Test full address display."""
-        addr = "0x1234567890123456789012345678901234567890"
-        result = format_address(addr, truncate=False)
-        assert result == addr
-
-    def test_empty_address(self):
-        """Test empty address returns placeholder."""
-        assert format_address("") == "<not configured>"
-
-    def test_none_address(self):
-        """Test None-like address returns placeholder."""
-        assert format_address(None) == "<not configured>"
-
-    def test_short_address_not_truncated(self):
-        """Test short address (non-standard) not truncated."""
-        addr = "0x123"
-        result = format_address(addr, truncate=True)
-        # Short addresses don't match the 42-char check
-        assert result == addr
+    def test_custom_decimals_scaling(self) -> None:
+        # 1 USDC at 6 decimals
+        assert _fmt_wei(10**6, decimals=6) == "1"
+        assert _fmt_wei(15 * 10**5, decimals=6) == "1.5"
 
 
-class TestTransactionPreview:
-    """Tests for TransactionPreview dataclass."""
+class TestFmtGas:
+    def test_commas_inserted(self) -> None:
+        assert _fmt_gas(1_000_000) == "1,000,000"
 
-    def test_create_preview(self):
-        """Test creating a transaction preview."""
-        preview = TransactionPreview(
-            tx_type="deposit",
-            target_address="0x1234567890123456789012345678901234567890",
-            user_address="0xabcdef1234567890abcdef1234567890abcdef12",
-            amount=1000 * 10**18,
-            token_id=5,
-            asset_type="USD",
-            gas_estimate=150000,
-        )
-        assert preview.tx_type == "deposit"
-        assert preview.token_id == 5
-        assert preview.asset_type == "USD"
+    def test_small_number_no_commas(self) -> None:
+        assert _fmt_gas(42) == "42"
+
+    def test_zero(self) -> None:
+        assert _fmt_gas(0) == "0"
 
 
-class TestCreateTransactionPreviews:
-    """Tests for create_transaction_previews function."""
+class TestAddr:
+    def test_empty_returns_tbd_style(self) -> None:
+        out = _addr("")
+        assert "TBD" in out
 
-    @pytest.fixture
-    def sample_positions(self):
-        """Create sample positions for testing."""
-        return [
-            PositionMigration(
-                user_address="0x1111111111111111111111111111111111111111",
-                asset_type="USD",
-                token_id=0,
-                deposit_amount=5000 * 10**18,
-                mint_amount=1000 * 10**18,
-                chain="mainnet",
-            ),
-            PositionMigration(
-                user_address="0x2222222222222222222222222222222222222222",
-                asset_type="ETH",
-                token_id=0,
-                deposit_amount=2 * 10**18,
-                mint_amount=1 * 10**18,
-                chain="mainnet",
-            ),
-        ]
+    def test_zero_address_returns_tbd_style(self) -> None:
+        out = _addr("0x" + "0" * 40)
+        assert "TBD" in out
 
-    @pytest.fixture
-    def sample_chain_config(self):
-        """Create sample chain config."""
-        return {
-            "multisig": "0x3333333333333333333333333333333333333333",
-            "cdp_usd": "0x4444444444444444444444444444444444444444",
-            "cdp_eth": "0x5555555555555555555555555555555555555555",
-            "nft_usd": "0x6666666666666666666666666666666666666666",
-            "nft_eth": "0x7777777777777777777777777777777777777777",
-        }
-
-    def test_creates_correct_number_of_previews(self, sample_positions, sample_chain_config):
-        """Test that 3 previews are created per position."""
-        previews = create_transaction_previews(sample_positions, sample_chain_config)
-        # 2 positions * 3 tx types = 6 previews
-        assert len(previews) == 6
-
-    def test_preview_order(self, sample_positions, sample_chain_config):
-        """Test that previews are in correct order: deposits, mints, transfers."""
-        previews = create_transaction_previews(sample_positions, sample_chain_config)
-
-        # First 2 should be deposits
-        assert previews[0].tx_type == "deposit"
-        assert previews[1].tx_type == "deposit"
-
-        # Next 2 should be mints
-        assert previews[2].tx_type == "mint"
-        assert previews[3].tx_type == "mint"
-
-        # Last 2 should be transfers
-        assert previews[4].tx_type == "transfer"
-        assert previews[5].tx_type == "transfer"
-
-    def test_correct_contract_addresses(self, sample_positions, sample_chain_config):
-        """Test that correct contract addresses are assigned."""
-        previews = create_transaction_previews(sample_positions, sample_chain_config)
-
-        # USD deposit should target cdp_usd
-        usd_deposit = [p for p in previews if p.tx_type == "deposit" and p.asset_type == "USD"][0]
-        assert usd_deposit.target_address == sample_chain_config["cdp_usd"]
-
-        # ETH transfer should target nft_eth
-        eth_transfer = [p for p in previews if p.tx_type == "transfer" and p.asset_type == "ETH"][0]
-        assert eth_transfer.target_address == sample_chain_config["nft_eth"]
-
-    def test_empty_positions_returns_empty_list(self, sample_chain_config):
-        """Test that empty positions list returns empty previews."""
-        previews = create_transaction_previews([], sample_chain_config)
-        assert previews == []
+    def test_non_zero_returns_short_form(self) -> None:
+        addr = "0xAAAABBBBCCCCDDDDEEEEFFFF1111222233334444"
+        out = _addr(addr)
+        # Should show "0xAAAA...4444" pattern (first 6 + last 4 chars).
+        assert "0xAAAA" in out
+        assert "4444" in out
+        assert "..." in out
 
 
-class TestFormatTransactionLine:
-    """Tests for format_transaction_line function."""
+class TestBatchRow:
+    def _batch(self, gas: int, n_calls: int = 1, number: int = 1, btype: str = "deposit") -> TransactionBatch:
+        b = TransactionBatch(batch_number=number, batch_type=btype)
+        for i in range(n_calls):
+            b.add_call(TransactionCall(to="0x" + "0" * 40, data=b"", gas_estimate=gas // n_calls or 1))
+        b.total_gas = gas  # force exact for utilization calc
+        return b
 
-    def test_deposit_line(self):
-        """Test formatting a deposit transaction line."""
-        preview = TransactionPreview(
-            tx_type="deposit",
-            target_address="0x1234567890123456789012345678901234567890",
-            user_address="0xabcdef1234567890abcdef1234567890abcdef12",
-            amount=1000 * 10**18,
-            token_id=5,
-            asset_type="USD",
-            gas_estimate=150000,
-        )
-        result = format_transaction_line(preview, 1)
-        assert "deposit" in result
-        assert "Token #5" in result
-        assert "USD" in result
+    def test_output_contains_batch_number_and_type(self) -> None:
+        b = self._batch(gas=1_000_000, n_calls=3, number=7, btype="mint")
+        row = _batch_row(b, gas_limit=10_000_000)
+        assert "Batch" in row
+        assert "7" in row
+        assert "mint" in row
 
-    def test_transfer_shows_dash_for_amount(self):
-        """Test that transfer transactions show dash for amount."""
-        preview = TransactionPreview(
-            tx_type="transfer",
-            target_address="0x1234567890123456789012345678901234567890",
-            user_address="0xabcdef1234567890abcdef1234567890abcdef12",
-            amount=0,
-            token_id=5,
-            asset_type="USD",
-            gas_estimate=65000,
-        )
-        result = format_transaction_line(preview, 1)
-        assert "transfer" in result
-        # The dash should appear somewhere in the amount field
-        assert "Amount:" in result and "-" in result
+    def test_output_contains_txn_count(self) -> None:
+        b = self._batch(gas=1_000_000, n_calls=42)
+        row = _batch_row(b, gas_limit=10_000_000)
+        assert "42" in row
+
+    def test_output_contains_gas_with_commas(self) -> None:
+        b = self._batch(gas=1_000_000, n_calls=1)
+        row = _batch_row(b, gas_limit=10_000_000)
+        assert "1,000,000" in row
+
+    def test_output_contains_utilization_percent(self) -> None:
+        b = self._batch(gas=5_000_000, n_calls=1)
+        row = _batch_row(b, gas_limit=10_000_000)
+        assert "50" in row  # 50% utilization
+        assert "%" in row
 
 
-class TestFormatBatchHeader:
-    """Tests for format_batch_header function."""
+# ---------------------------------------------------------------------------
+# Integration: print_migration_plan via capsys
+# ---------------------------------------------------------------------------
 
-    def test_batch_header_content(self):
-        """Test batch header contains expected information."""
-        batch = TransactionBatch(batch_number=1)
-        batch.add_call(TransactionCall(
-            to="0x1234567890123456789012345678901234567890",
-            data=b"test",
-            gas_estimate=150000,
+
+def _mk_position(deposit_wei=10**18, mint_wei=0, credit_wei=0, addr="0x1111111111111111111111111111111111111111") -> PositionMigration:
+    return PositionMigration(
+        user_address=addr,
+        asset_type=AssetType.USD,
+        chain="mainnet",
+        deposit_amount_wei=deposit_wei,
+        mint_amount_wei=mint_wei,
+        credit_amount_wei=credit_wei,
+    )
+
+
+def _mk_batch(n_calls: int, btype: str, number: int = 1) -> TransactionBatch:
+    b = TransactionBatch(batch_number=number, batch_type=btype)
+    for i in range(n_calls):
+        b.add_call(TransactionCall(
+            to="0x" + "0" * 40,
+            data=b"\x00" * 36,
+            gas_estimate=100_000,
+            description=f"call {i}",
         ))
-
-        result = format_batch_header(batch, 1)
-        assert "Batch 1" in result
-        assert "1 transaction" in result
+    return b
 
 
-class TestFormatPreviewHeader:
-    """Tests for format_preview_header function."""
-
-    def test_preview_header_content(self):
-        """Test preview header contains expected information."""
-        result = format_preview_header("mainnet", 10)
-        assert "MIGRATION PREVIEW" in result
-        assert "mainnet" in result
-        assert "10" in result
-
-
-class TestFormatPositionSummary:
-    """Tests for format_position_summary function."""
-
-    def test_position_summary_with_both_types(self):
-        """Test position summary shows both USD and ETH."""
-        result = format_position_summary(
-            usd_count=5,
-            eth_count=3,
-            total_usd_collateral=5000 * 10**18,
-            total_eth_collateral=10 * 10**18,
-            total_usd_debt=1000 * 10**18,
-            total_eth_debt=2 * 10**18,
-        )
-        assert "USD Positions: " in result
-        assert "ETH Positions: " in result
-        assert "5" in result
-        assert "3" in result
-
-    def test_position_summary_usd_only(self):
-        """Test position summary with only USD positions."""
-        result = format_position_summary(
-            usd_count=5,
-            eth_count=0,
-            total_usd_collateral=5000 * 10**18,
-            total_eth_collateral=0,
-            total_usd_debt=1000 * 10**18,
-            total_eth_debt=0,
-        )
-        assert "USD Positions:" in result
-        assert "ETH Positions:" not in result
+def _minimal_plan(*, with_pre_deposit: bool = False, verbose_batches: bool = False) -> MigrationPlan:
+    plan = MigrationPlan(chain="mainnet", asset_type=AssetType.USD)
+    plan.positions = [
+        _mk_position(addr="0x" + "1" * 40, mint_wei=10**17),
+        _mk_position(addr="0x" + "2" * 40, mint_wei=0, credit_wei=10**16),
+    ]
+    plan.deposit_batches = [_mk_batch(3, "deposit")]
+    plan.transfer_batches = [_mk_batch(2, "transfer")]
+    plan.credit_batches = [_mk_batch(1, "credit")]
+    if with_pre_deposit:
+        plan.approve_underlying_batches = [_mk_batch(1, "approve_underlying")]
+        plan.myt_deposit_batches = [_mk_batch(1, "deposit_myt")]
+        plan.approve_myt_batches = [_mk_batch(1, "approve_myt")]
+    return plan
 
 
-class TestFormatBatchTotals:
-    """Tests for format_batch_totals function."""
-
-    def test_batch_totals_with_batches(self):
-        """Test batch totals formatting."""
-        batch1 = TransactionBatch(batch_number=1)
-        batch1.add_call(TransactionCall(
-            to="0x1234567890123456789012345678901234567890",
-            data=b"test",
-            gas_estimate=150000,
-        ))
-        batch2 = TransactionBatch(batch_number=2)
-        batch2.add_call(TransactionCall(
-            to="0x1234567890123456789012345678901234567890",
-            data=b"test",
-            gas_estimate=120000,
-        ))
-
-        result = format_batch_totals([batch1, batch2])
-        assert "Total Batches:" in result
-        assert "Total Transactions:" in result
-        assert "Total Gas:" in result
-
-    def test_batch_totals_empty_list(self):
-        """Test batch totals with empty list."""
-        result = format_batch_totals([])
-        assert "Total Batches:" in result
-        assert "0" in result
+CHAIN_CONFIG = {
+    "chain_id": 1,
+    "multisig": "0xABCD567890abcdef1234567890abcdef12345678",
+    "usd": {},
+    "eth": {},
+}
+ASSET_CONFIG = {
+    "alchemist": "0x1111222233334444555566667777888899990000",
+    "al_token": "0xAAAAAAAABBBBBBBBCCCCCCCCDDDDDDDDEEEEEEEE",
+    "myt": "0x9999888877776666555544443333222211110000",
+    "underlying": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+    "nft": "0x5555666677778888999900001111222233334444",
+    "myt_decimals": 18,
+}
 
 
-class TestFormatConfirmationPrompt:
-    """Tests for format_confirmation_prompt function."""
+class TestPrintMigrationPlanIntegration:
+    def test_every_section_header_rendered(self, capsys) -> None:
+        plan = _minimal_plan(with_pre_deposit=True)
+        print_migration_plan(plan, CHAIN_CONFIG, ASSET_CONFIG)
+        out = capsys.readouterr().out
+        assert "MIGRATION PLAN" in out
+        assert "Position Summary" in out
+        assert "Phase A" in out
+        assert "Phase B" in out
+        assert "Phase C" in out
+        assert "Phase D" in out
+        assert "Phase 1 — Alchemist deposit" in out
+        assert "Phase 2 — Mint" in out
+        assert "Phase 3 — Verify" in out
+        assert "Phase 4 — Distribute NFTs" in out
+        assert "Phase 5 — Credit" in out
+        assert "Totals" in out
 
-    def test_confirmation_prompt_content(self):
-        """Test confirmation prompt contains expected information."""
-        result = format_confirmation_prompt(
-            chain="mainnet",
-            total_positions=10,
-            total_batches=2,
-            total_gas=1000000,
-        )
-        assert "WARNING" in result
-        assert "2 transaction" in result
-        assert "mainnet" in result
-        assert "10 position" in result
+    def test_empty_pre_deposit_sections_render_as_none(self, capsys) -> None:
+        """Without myt/underlying, pre-deposit lists are empty — preview must not crash."""
+        plan = _minimal_plan(with_pre_deposit=False)
+        print_migration_plan(plan, CHAIN_CONFIG, ASSET_CONFIG)
+        out = capsys.readouterr().out
+        assert "(none)" in out  # at least the pre-deposit and mint sections
+        assert "Phase A" in out
 
+    def test_totals_count_all_batch_lists(self, capsys) -> None:
+        plan = _minimal_plan(with_pre_deposit=True)
+        print_migration_plan(plan, CHAIN_CONFIG, ASSET_CONFIG)
+        out = capsys.readouterr().out
+        # Deposit=1, transfer=2 batches total, credit=1, pre-deposit=1+1+1.
+        # Check the individual totals lines are printed.
+        assert "ApproveUnderlying:" in out
+        assert "DepositMYT:" in out
+        assert "ApproveMYT:" in out
+        assert "Deposit batches:" in out
+        assert "Transfer batches:" in out
+        assert "Credit batches:" in out
 
-class TestFormatExecutionProgress:
-    """Tests for format_execution_progress function."""
+    def test_multisig_address_shown_in_short_form(self, capsys) -> None:
+        plan = _minimal_plan()
+        print_migration_plan(plan, CHAIN_CONFIG, ASSET_CONFIG)
+        out = capsys.readouterr().out
+        # Addr format: 0xABCD...5678
+        assert "0xABCD" in out
 
-    def test_progress_without_hash(self):
-        """Test progress message without transaction hash."""
-        result = format_execution_progress(
-            batch_index=1,
-            total_batches=5,
-            status="Processing...",
-        )
-        assert "[1/5]" in result
-        assert "Processing..." in result
+    def test_verbose_mode_prints_call_descriptions(self, capsys) -> None:
+        plan = _minimal_plan()
+        print_migration_plan(plan, CHAIN_CONFIG, ASSET_CONFIG, verbose=True)
+        out = capsys.readouterr().out
+        # Non-verbose wouldn't include call descriptions; verbose should.
+        assert "call 0" in out
 
-    def test_progress_with_hash(self):
-        """Test progress message with transaction hash."""
-        result = format_execution_progress(
-            batch_index=2,
-            total_batches=5,
-            status="Completed",
-            tx_hash="0x1234567890123456789012345678901234567890",
-        )
-        assert "[2/5]" in result
-        assert "Hash:" in result
-
-
-class TestFormatFinalSummary:
-    """Tests for format_final_summary function."""
-
-    def test_success_summary(self):
-        """Test final summary for successful migration."""
-        result = format_final_summary(
-            chain="mainnet",
-            total_positions=10,
-            total_batches=2,
-            successful_batches=2,
-            failed_batches=0,
-            batch_results=[
-                {"status": "stubbed", "nonce": 0},
-                {"status": "stubbed", "nonce": 1},
-            ],
-        )
-        assert "SUCCESS" in result
-        assert "mainnet" in result
-        assert "10" in result
-        assert "2/2" in result
-
-    def test_partial_success_summary(self):
-        """Test final summary for partial success."""
-        result = format_final_summary(
-            chain="mainnet",
-            total_positions=10,
-            total_batches=2,
-            successful_batches=1,
-            failed_batches=1,
-            batch_results=[
-                {"status": "stubbed", "nonce": 0},
-                {"status": "error", "nonce": None},
-            ],
-        )
-        assert "PARTIAL SUCCESS" in result
-
-    def test_failed_summary(self):
-        """Test final summary for failed migration."""
-        result = format_final_summary(
-            chain="mainnet",
-            total_positions=10,
-            total_batches=2,
-            successful_batches=0,
-            failed_batches=2,
-            batch_results=[
-                {"status": "error", "nonce": None},
-                {"status": "error", "nonce": None},
-            ],
-        )
-        assert "FAILED" in result
-
-
-class TestFormatPreviewFooter:
-    """Tests for format_preview_footer function."""
-
-    def test_footer_returns_string(self):
-        """Test that footer returns a string with separator."""
-        result = format_preview_footer()
-        assert isinstance(result, str)
-        assert "=" in result
+    def test_tbd_shown_for_empty_multisig(self, capsys) -> None:
+        chain_with_empty_multisig = {**CHAIN_CONFIG, "multisig": ""}
+        plan = _minimal_plan()
+        print_migration_plan(plan, chain_with_empty_multisig, ASSET_CONFIG)
+        out = capsys.readouterr().out
+        assert "TBD" in out

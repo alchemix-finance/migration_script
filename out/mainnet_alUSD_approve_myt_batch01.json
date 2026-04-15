@@ -1,0 +1,21 @@
+{
+  "version": "1.0",
+  "chainId": "1",
+  "createdAt": 1776207948473,
+  "meta": {
+    "name": "mainnet_alUSD_approve_myt_batch1",
+    "description": "approve_myt \u2014 batch 1 (1 calls)",
+    "txBuilderVersion": "1.17.0",
+    "createdFromSafeAddress": "0xF56D660138815fC5d7a06cd0E1630225E788293D",
+    "createdFromOwnerAddress": ""
+  },
+  "transactions": [
+    {
+      "to": "0x9B44efCa3e2a707B63Dc00CE79d646E5E5D24bA5",
+      "value": "0",
+      "data": "0x095ea7b3000000000000000000000000eb83112d925268bede86654c13d423a987587e3e00000000000000000000000000000000000000000003bd4cad30dac435135d78",
+      "contractMethod": null,
+      "contractInputsValues": null
+    }
+  ]
+}
