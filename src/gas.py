@@ -4,7 +4,7 @@ Batching strategy:
   Each batch is limited by three constraints (whichever is hit first):
     1. Gas:   90% of chain's block gas limit
     2. Size:  90% of chain's max transaction calldata
-    3. Calls: MAX_CALLS_PER_BATCH (default 200), MAX_MINTS_PER_BATCH (70)
+    3. Calls: MAX_CALLS_PER_BATCH (default 200), MAX_MINTS_PER_BATCH (30), MAX_DEPOSITS_PER_BATCH (51)
 
   Per-chain limits:
     mainnet:  60M gas,  128KB calldata
@@ -30,6 +30,7 @@ from src.config import (
     GAS_LARGE_POSITION_SURCHARGE,
     LARGE_POSITION_THRESHOLD,
     MAX_CALLS_PER_BATCH,
+    MAX_DEPOSITS_PER_BATCH,
     MAX_MINTS_PER_BATCH,
     MULTISEND_CALL_BYTES,
     MULTISEND_WRAPPER_BYTES,
@@ -114,8 +115,8 @@ def create_deposit_batches(
     # end up NOT emitting it (live cap already covers), the headroom is fine.
     gas_limit = get_effective_gas_limit(chain) - GAS_SET_DEPOSIT_CAP
     size_limit = get_effective_size_limit(chain) - MULTISEND_CALL_BYTES - 36  # 4 selector + 32 arg
-    # Reserve 1 slot for a potential setDepositCap at batch start.
-    max_deposits = MAX_CALLS_PER_BATCH - 1
+    # Respect the deposit-specific batch cap, minus 1 slot for setDepositCap.
+    max_deposits = min(MAX_CALLS_PER_BATCH, MAX_DEPOSITS_PER_BATCH) - 1
 
     batches: list[TransactionBatch] = []
     current_batch = TransactionBatch(batch_number=1, batch_type="deposit")
